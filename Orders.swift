@@ -26,7 +26,7 @@ struct OrdersView: View {
     private var countKey: String { model.shopScopeKey + ":\(model.revision)" }
     private var loadKey: String { countKey + ":" + model.selectedFeed.rawValue + ":" + assembly }
     private var cameraScope: String { model.shopScopeKey + ":" + model.selectedFeed.rawValue + ":" + assembly }
-    private var mapEntries: [ParcelMapEntry] { ParcelMapEntry.entries(orders, feed: model.selectedFeed, shopColors: Dictionary(uniqueKeysWithValues: model.shops.compactMap { shop in shop.color.map { (shop.id, $0) } })) }
+    private var mapEntries: [ParcelMapEntry] { ParcelMapEntry.entries(orders, feed: model.selectedFeed, shopColors: Dictionary(model.shops.compactMap { shop in shop.color.map { (shop.id, $0) } }, uniquingKeysWith: { _, latest in latest })) }
     var body: some View {
         GeometryReader { geometry in
             ScrollViewReader { listProxy in

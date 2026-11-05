@@ -11,6 +11,7 @@ struct OriginalCourierShell: View {
         GeometryReader { geometry in
             ZStack(alignment: .top) {
                 OriginalCourierSurface(controller: controller, model: model)
+                    .accessibilityHidden(controller.runtimeFailed)
                 if controller.wheelOpen {
                     NavigationStack {
                         WheelView()
@@ -29,12 +30,15 @@ struct OriginalCourierShell: View {
                     .background(Palette.background)
                     .accessibilityIdentifier("original.wheel.page")
                 }
-                if let failure = controller.failure, !controller.wheelOpen {
+                if controller.runtimeFailed && !controller.wheelOpen {
+                    OriginalWebRecoveryView(controller: controller)
+                } else if let failure = controller.failure, !controller.wheelOpen {
                     VStack(spacing: 16) {
                         Image(systemName: "wifi.exclamationmark").font(.largeTitle)
                         Text("Не удалось открыть ВВ").font(.headline)
                         Text(failure).font(.subheadline).multilineTextAlignment(.center)
                         Button("Повторить загрузку") { controller.reload() }.buttonStyle(CourierButtonStyle(primary: true))
+                        Button("Мои заказы") { controller.openRecoveryOrders() }.buttonStyle(CourierButtonStyle())
                         Button("Колесо") { controller.openWheel() }.buttonStyle(CourierButtonStyle())
                     }.padding(24).frame(maxWidth: .infinity, maxHeight: .infinity).background(Palette.background)
                         .accessibilityIdentifier("original.web.error")
@@ -61,6 +65,11 @@ struct OriginalCourierShell: View {
                     }.modifier(CompanionNotificationOverlay())
                 case .settings:
                     NavigationStack { CompanionSettingsView().toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Готово") { controller.presented = nil } } } }.modifier(CompanionNotificationOverlay())
+                case .recoveryOrders:
+                    NavigationStack {
+                        OrdersView()
+                            .toolbar { ToolbarItem(placement: .topBarLeading) { Button("Готово") { controller.presented = nil }.accessibilityIdentifier("original.orders-recovery.close") } }
+                    }.modifier(CompanionNotificationOverlay())
                 }
             }
             .onChange(of: model.loginPresented) { _, value in
@@ -68,6 +77,33 @@ struct OriginalCourierShell: View {
             }
             .onChange(of: model.notificationTarget?.id) { _, _ in controller.openNotification() }
             .modifier(CompanionNotificationOverlay())
+    }
+}
+
+/// The website's React boundary must not strand an already accepted order.
+/// Opening this sheet only reads the current feed; mutations keep their existing
+/// confirmation, validation and server readback in the native order screens.
+private struct OriginalWebRecoveryView: View {
+    @ObservedObject var controller: OriginalCourierController
+    @State private var copied = false
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "exclamationmark.triangle").font(.largeTitle).foregroundStyle(Palette.warning)
+            Text("Ошибка экрана ВВ").font(.headline)
+            Text("Экран ВВ не смог показать заказы. Открой «Мои заказы», чтобы продолжить работу.")
+                .font(.subheadline).multilineTextAlignment(.center)
+            Button("Мои заказы") { controller.openRecoveryOrders() }
+                .buttonStyle(CourierButtonStyle(primary: true)).accessibilityIdentifier("original.recovery.orders")
+            Button("Повторить загрузку экрана") { controller.reload() }
+                .buttonStyle(CourierButtonStyle()).accessibilityIdentifier("original.recovery.reload")
+            Button("Колесо") { controller.openWheel() }
+                .buttonStyle(CourierButtonStyle()).accessibilityIdentifier("original.recovery.wheel")
+            Button(copied ? "Код ошибки скопирован" : "Скопировать код ошибки") {
+                UIPasteboard.general.string = controller.diagnosticReport
+                copied = true
+            }.font(.subheadline).accessibilityIdentifier("original.recovery.copy")
+        }.padding(24).frame(maxWidth: .infinity, maxHeight: .infinity).background(Palette.background)
+            .accessibilityIdentifier("original.web.runtime-error")
     }
 }
 
@@ -118,10 +154,11 @@ private struct CompanionSettingsView: View {
 }
 
 @MainActor final class OriginalCourierController: UIViewController, ObservableObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
-    enum Destination: String, Identifiable { case income, notifications, telegram, settings; var id: String { rawValue } }
+    enum Destination: String, Identifiable { case income, notifications, telegram, settings, recoveryOrders; var id: String { rawValue } }
     @Published var wheelOpen = false
     @Published var loading = true
     @Published var failure: String?
+    @Published private(set) var runtimeFailed = false
     @Published var barVisible = false
     @Published var barHeight: CGFloat = 58
     @Published var presented: Destination?
@@ -145,7 +182,11 @@ private struct CompanionSettingsView: View {
         guard let url = Bundle.main.url(forResource: "OriginalRuntime", withExtension: "js"), let source = try? String(contentsOf: url, encoding: .utf8) else {
             failure = "В сборке отсутствует подключение нативных функций. Переустанови последнюю IPA."; loading = false; return
         }
-        runtime = source
+        guard let diagnosticURL = Bundle.main.url(forResource: "OriginalDiagnostics", withExtension: "js"),
+              let diagnosticSource = try? String(contentsOf: diagnosticURL, encoding: .utf8) else {
+            failure = "В сборке отсутствует обработка ошибок экрана ВВ. Переустанови последнюю IPA."; loading = false; return
+        }
+        runtime = diagnosticSource + "\n" + source
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
         configuration.allowsInlineMediaPlayback = true
@@ -194,9 +235,25 @@ private struct CompanionSettingsView: View {
     func closeWheel() { if wheelOpen { wheelOpen = false }; evaluate("window.__vvCompanion?.setWheel(false)") }
     func navigate(_ path: String) {
         guard path.hasPrefix("/"), !path.hasPrefix("//"), !path.contains("\\") else { return }
+        if runtimeFailed && !fixture {
+            runtimeFailed = false
+            loading = true
+            guard let url = URL(string: "https://courier.vkusvill.ru" + path), trusted(url) else { return }
+            webView.load(URLRequest(url: url))
+            return
+        }
         evaluate("window.__vvCompanion?.navigate(\(Self.json(path)))")
     }
-    func reload() { guard webView != nil else { return }; failure = nil; loading = true; webView.reload() }
+    func reload() { guard webView != nil else { return }; failure = nil; runtimeFailed = false; loading = true; webView.reload() }
+    func openRecoveryOrders() {
+        model?.selectedFeed = .mine
+        closeWheel()
+        presented = .recoveryOrders
+    }
+    var diagnosticReport: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"
+        return "VV Courier " + version + "\n" + OriginalWebDiagnostics.shared.reportText
+    }
     func openNotification() {
         guard let target = model?.notificationTarget, target.courierID == model?.session?.courierID else { return }
         presented = nil
@@ -213,7 +270,9 @@ private struct CompanionSettingsView: View {
         guard message.frameInfo.isMainFrame, trusted(message.frameInfo.request.url),
               let body = message.body as? [String: Any], let kind = body["kind"] as? String,
               let incomingDocument = body["documentID"] as? String, incomingDocument.count < 150 else { return }
-        if kind == "boot" || documentID == nil { documentID = incomingDocument }
+        // A late diagnostic/plugin reply from the previous page cannot claim a
+        // new navigation. Only its document-start boot establishes identity.
+        if kind == "boot" { documentID = incomingDocument; runtimeFailed = false }
         guard documentID == incomingDocument else { return }
         // Token migration runs once; future navigations get only the bridge.
         if kind == "boot" || kind == "ready" {
@@ -221,6 +280,12 @@ private struct CompanionSettingsView: View {
             userContentController.addUserScript(WKUserScript(source: runtime, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         }
         switch kind {
+        case "diagnostic":
+            if let event = OriginalWebDiagnostics.shared.record(body), event.fatal {
+                runtimeFailed = true
+                loading = false
+                barVisible = false
+            }
         case "ready": loading = false; failure = nil; runtimeReady = true; openNotification()
         case "navigation":
             let visible = body["barVisible"] as? Bool ?? false
@@ -324,7 +389,7 @@ private struct CompanionSettingsView: View {
         return text
     }
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-        documentID = nil; runtimeReady = false; configureHardware(); loading = true; failure = nil
+        documentID = nil; runtimeReady = false; runtimeFailed = false; configureHardware(); loading = true; failure = nil
     }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { loading = false; failure = nil }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { failed(error) }
