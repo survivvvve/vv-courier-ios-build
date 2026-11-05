@@ -6,7 +6,7 @@ on:
         description: iPhone UI scenarios
         type: choice
         default: all
-        options: [all, theme, original, earnings, startup]
+        options: [all, theme, original, earnings, poster, startup]
 permissions:
   contents: read
 concurrency:
@@ -46,6 +46,8 @@ jobs:
             set -- -only-testing:CourierUITests/OriginalIntegrationTests
           elif [ "${{ inputs.ui_scope }}" = "earnings" ]; then
             set -- -only-testing:CourierUITests/OriginalIntegrationTests -only-testing:CourierUITests/IncomeFeatureTests
+          elif [ "${{ inputs.ui_scope }}" = "poster" ]; then
+            set -- -only-testing:CourierUITests/IncomeFeatureTests/testPosterExportsActualLandscapePNG
           elif [ "${{ inputs.ui_scope }}" = "startup" ]; then
             set -- -only-testing:CourierUITests/CourierFlowTests/testTerminalAndSchedule -test-timeouts-enabled YES -default-test-execution-time-allowance 120 -maximum-test-execution-time-allowance 120
             bash Tests/capture_startup.sh "$DEVICE_ID" &
@@ -68,10 +70,8 @@ jobs:
           if [ -d build/ReleaseQA.xcresult ]; then
             xcrun xcresulttool export attachments --path build/ReleaseQA.xcresult --output-path build/screenshots
           fi
-          if INCOME_APP_DATA=$(xcrun simctl get_app_container booted ru.local.vvcourier.ios data 2>/dev/null); then
-            mkdir -p build/screenshots/posters
-            find "$INCOME_APP_DATA/tmp" -type f -name 'VV-Courier-income-*.png' -exec cp {} build/screenshots/posters/ \;
-          fi
+          mkdir -p build/screenshots/posters
+          find "$HOME/Library/Developer/CoreSimulator/Devices" -type f -name 'VV-Courier-income-*.png' -exec cp {} build/screenshots/posters/ \;
       - name: Archive unsigned app
         run: >-
           xcodebuild -project VVCourier.xcodeproj -scheme VVCourier
