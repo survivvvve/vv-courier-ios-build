@@ -27,6 +27,8 @@ jobs:
           chmod +x Tests/*.sh
           bash Tests/run_core_tests.sh
           bash Tests/run_original_runtime_tests.sh
+          bash Tests/run_original_diagnostics_tests.sh
+          bash Tests/run_original_web_diagnostics_tests.sh
           bash Tests/run_payment_tests.sh
           bash Tests/run_inspection_tests.sh
           bash Tests/run_wheel_tests.sh
@@ -85,21 +87,21 @@ jobs:
           mkdir -p build/package/Payload
           cp -R build/VVCourier.xcarchive/Products/Applications/VVCourier.app build/package/Payload/
           cd build/package
-          /usr/bin/ditto -c -k --keepParent Payload ../VV-Courier-1.2.0.ipa
+          /usr/bin/ditto -c -k --keepParent Payload ../VV-Courier-1.2.1.ipa
       - name: Validate distributable IPA
-        run: python3 Tests/validate_ipa.py build/VV-Courier-1.2.0.ipa
+        run: python3 Tests/validate_ipa.py build/VV-Courier-1.2.1.ipa
       - uses: actions/upload-artifact@v4
         with:
-          name: VV-Courier-1.2.0-SideStore
+          name: VV-Courier-1.2.1-SideStore
           path: |
-            build/VV-Courier-1.2.0.ipa
+            build/VV-Courier-1.2.1.ipa
             build/IPA-Validation.json
           if-no-files-found: error
           retention-days: 14
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: VV-Courier-1.2.0-QA
+          name: VV-Courier-1.2.1-QA
           path: |
             build/screenshots
             build/ReleaseQA.xcresult
