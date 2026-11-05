@@ -1,0 +1,110 @@
+name: Build IPA for SideStore
+on:
+  workflow_dispatch:
+    inputs:
+      ui_scope:
+        description: iPhone UI scenarios
+        type: choice
+        default: all
+        options: [all, theme, original, earnings, startup]
+permissions:
+  contents: read
+concurrency:
+  group: ios-build-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install project generator
+        run: brew install xcodegen
+      - name: Extract build resources
+        run: python3 -m zipfile -e BuildSupport.zip .
+      - name: Verify courier, scanning and wheel logic
+        run: |
+          chmod +x Tests/*.sh
+          bash Tests/run_core_tests.sh
+          bash Tests/run_original_runtime_tests.sh
+          bash Tests/run_payment_tests.sh
+          bash Tests/run_inspection_tests.sh
+          bash Tests/run_wheel_tests.sh
+          bash Tests/run_express_tests.sh
+          bash Tests/run_telegram_tests.sh
+      - name: Generate Xcode project
+        run: xcodegen generate --spec project.yml
+      - name: Check offline iPhone interface
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEVICE_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for rows in d["devices"].values() for x in rows if x["name"].startswith("iPhone")))')
+          set --
+          if [ "${{ inputs.ui_scope }}" = "theme" ]; then
+            set -- -only-testing:CourierUITests/CourierFlowTests/testLivePaletteUpdatesPreloadedScreens
+          elif [ "${{ inputs.ui_scope }}" = "original" ]; then
+            set -- -only-testing:CourierUITests/OriginalIntegrationTests
+          elif [ "${{ inputs.ui_scope }}" = "earnings" ]; then
+            set -- -only-testing:CourierUITests/OriginalIntegrationTests -only-testing:CourierUITests/IncomeFeatureTests
+          elif [ "${{ inputs.ui_scope }}" = "startup" ]; then
+            set -- -only-testing:CourierUITests/CourierFlowTests/testTerminalAndSchedule -test-timeouts-enabled YES -default-test-execution-time-allowance 120 -maximum-test-execution-time-allowance 120
+            bash Tests/capture_startup.sh "$DEVICE_ID" &
+          fi
+          xcodebuild test -project VVCourier.xcodeproj -scheme VVCourier \
+            -configuration Debug -destination "platform=iOS Simulator,id=$DEVICE_ID" \
+            -resultBundlePath build/ReleaseQA.xcresult \
+            "$@" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+      - name: Collect app crash diagnostics
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p build/crash-reports
+          find "$HOME/Library/Logs/DiagnosticReports" "$HOME/Library/Developer/CoreSimulator/Devices" -type f \( -name 'VVCourier*.ips' -o -name 'VV Courier*.ips' -o -name 'VVCourier*.crash' \) -exec cp {} build/crash-reports/ \; 2>/dev/null || true
+      - name: Export interface screenshots
+        if: always()
+        shell: bash
+        run: |
+          if [ -d build/ReleaseQA.xcresult ]; then
+            xcrun xcresulttool export attachments --path build/ReleaseQA.xcresult --output-path build/screenshots
+          fi
+          if INCOME_APP_DATA=$(xcrun simctl get_app_container booted ru.local.vvcourier.ios data 2>/dev/null); then
+            mkdir -p build/screenshots/posters
+            find "$INCOME_APP_DATA/tmp" -type f -name 'VV-Courier-income-*.png' -exec cp {} build/screenshots/posters/ \;
+          fi
+      - name: Archive unsigned app
+        run: >-
+          xcodebuild -project VVCourier.xcodeproj -scheme VVCourier
+          -configuration Release -destination 'generic/platform=iOS'
+          -archivePath build/VVCourier.xcarchive
+          CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO archive
+      - name: Package unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/package/Payload
+          cp -R build/VVCourier.xcarchive/Products/Applications/VVCourier.app build/package/Payload/
+          cd build/package
+          /usr/bin/ditto -c -k --keepParent Payload ../VV-Courier-1.2.0.ipa
+      - name: Validate distributable IPA
+        run: python3 Tests/validate_ipa.py build/VV-Courier-1.2.0.ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VV-Courier-1.2.0-SideStore
+          path: |
+            build/VV-Courier-1.2.0.ipa
+            build/IPA-Validation.json
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: VV-Courier-1.2.0-QA
+          path: |
+            build/screenshots
+            build/ReleaseQA.xcresult
+            build/startup-sample.txt
+            build/startup-diagnostic.png
+            build/crash-reports
+          if-no-files-found: warn
+          retention-days: 7
