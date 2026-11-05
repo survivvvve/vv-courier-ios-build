@@ -1,0 +1,364 @@
+import SwiftUI
+import WebKit
+import SafariServices
+
+/// The courier website owns its navigation, map, orders and payment rules.
+/// Native additions share one persistent web view instead of recreating screens.
+struct OriginalCourierShell: View {
+    @EnvironmentObject private var model: AppModel
+    @StateObject private var controller = OriginalCourierController()
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .top) {
+                OriginalCourierSurface(controller: controller, model: model)
+                if controller.wheelOpen {
+                    NavigationStack {
+                        WheelView()
+                            .toolbar {
+                                ToolbarItem(placement: .topBarLeading) {
+                                    Button { controller.closeWheel() } label: { Label("ВВ", systemImage: "chevron.left") }
+                                        .accessibilityIdentifier("original.wheel.close")
+                                }
+                                ToolbarItem(placement: .topBarTrailing) {
+                                    Button { controller.presented = .settings } label: { Image(systemName: "gearshape") }
+                                        .accessibilityLabel("Настройки дополнения")
+                                }
+                            }
+                    }
+                    .frame(height: max(0, geometry.size.height - (controller.barVisible ? controller.barHeight : 0)))
+                    .background(Palette.background)
+                    .accessibilityIdentifier("original.wheel.page")
+                }
+                if let failure = controller.failure, !controller.wheelOpen {
+                    VStack(spacing: 16) {
+                        Image(systemName: "wifi.exclamationmark").font(.largeTitle)
+                        Text("Не удалось открыть ВВ").font(.headline)
+                        Text(failure).font(.subheadline).multilineTextAlignment(.center)
+                        Button("Повторить загрузку") { controller.reload() }.buttonStyle(CourierButtonStyle(primary: true))
+                        Button("Колесо") { controller.openWheel() }.buttonStyle(CourierButtonStyle())
+                    }.padding(24).frame(maxWidth: .infinity, maxHeight: .infinity).background(Palette.background)
+                        .accessibilityIdentifier("original.web.error")
+                } else if controller.loading && !controller.wheelOpen {
+                    ProgressView("ВкусВилл Курьер").padding(24).background(Palette.surface, in: RoundedRectangle(cornerRadius: 14))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity).allowsHitTesting(false)
+                }
+            }
+        }.background(Palette.background)
+            .sheet(item: $controller.presented) { destination in
+                switch destination {
+                case .income:
+                    IncomeView(onClose: { controller.presented = nil })
+                        .modifier(CompanionNotificationOverlay())
+                case .notifications:
+                    NavigationStack {
+                        ExpressNotificationSettingsView()
+                            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Готово") { controller.presented = nil }.accessibilityIdentifier("original.notifications.close") } }
+                    }.modifier(CompanionNotificationOverlay())
+                case .telegram:
+                    NavigationStack {
+                        TelegramNotificationStatusView()
+                            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Готово") { controller.presented = nil }.accessibilityIdentifier("original.telegram.close") } }
+                    }.modifier(CompanionNotificationOverlay())
+                case .settings:
+                    NavigationStack { CompanionSettingsView().toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Готово") { controller.presented = nil } } } }.modifier(CompanionNotificationOverlay())
+                }
+            }
+            .onChange(of: model.loginPresented) { _, value in
+                if value { controller.presented = nil; controller.closeWheel(); controller.navigate("/start/auth"); model.loginPresented = false }
+            }
+            .onChange(of: model.notificationTarget?.id) { _, _ in controller.openNotification() }
+            .modifier(CompanionNotificationOverlay())
+    }
+}
+
+@MainActor private struct CompanionNotificationOverlay: ViewModifier {
+    @ObservedObject private var center = ExpressNotificationCenter.shared
+    func body(content: Content) -> some View {
+        content.overlay(alignment: .top) {
+            if !center.foregroundEvents.isEmpty {
+                ExpressNotificationBanner()
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
+                    .padding(.horizontal, 12).padding(.top, 8)
+            }
+        }
+    }
+}
+
+private struct OriginalCourierSurface: UIViewControllerRepresentable {
+    let controller: OriginalCourierController
+    let model: AppModel
+    func makeUIViewController(context: Context) -> OriginalCourierController { controller.attach(model); return controller }
+    func updateUIViewController(_ controller: OriginalCourierController, context: Context) { }
+}
+
+private struct CompanionSettingsView: View {
+    var body: some View {
+        CourierPage("Дополнение к ВВ") {
+            CourierCard {
+                NavigationLink { ExpressNotificationSettingsView() } label: { CourierMenuRow(title: "Экспрессы на смене", symbol: "bell") }
+                Divider()
+                NavigationLink { IncomeView() } label: { CourierMenuRow(title: "Итоги заработка", symbol: "chart.bar") }
+                Divider()
+                NavigationLink { TelegramNotificationStatusView() } label: { CourierMenuRow(title: "Бот в Telegram", symbol: "paperplane") }.accessibilityIdentifier("companion.telegram")
+                Divider()
+                Button { CustomerVkusVillApp.open() } label: { CourierMenuRow(title: "ВкусВилл · потратить баллы", symbol: "creditcard.and.123") }.buttonStyle(.plain)
+            }
+            CourierCard {
+                NavigationLink { WheelSpeedSettingsView() } label: { CourierMenuRow(title: "Поправка скорости", symbol: "speedometer") }
+                Divider()
+                NavigationLink { WheelDashboardSettingsView() } label: { CourierMenuRow(title: "Плитки телеметрии", symbol: "square.grid.2x2") }
+                Divider()
+                NavigationLink { WheelAlarmSettingsView() } label: { CourierMenuRow(title: "Звуковые предупреждения", symbol: "speaker.wave.2") }
+            }
+            HStack(spacing: 4) { Text("Завайбкожено by"); Link("survive", destination: URL(string: "https://t.me/survivee")!) }
+                .font(.caption).foregroundStyle(Palette.muted).frame(maxWidth: .infinity)
+        }
+    }
+}
+
+@MainActor final class OriginalCourierController: UIViewController, ObservableObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
+    enum Destination: String, Identifiable { case income, notifications, telegram, settings; var id: String { rawValue } }
+    @Published var wheelOpen = false
+    @Published var loading = true
+    @Published var failure: String?
+    @Published var barVisible = false
+    @Published var barHeight: CGFloat = 58
+    @Published var presented: Destination?
+    private(set) var webView: WKWebView!
+    private weak var model: AppModel?
+    private var hardware: OriginalCameraBridge?
+    private var documentID: String?
+    private var pendingToken: String?
+    private var candidateSession: Session?
+    private var runtime = ""
+    private var runtimeReady = false
+    private var pendingNotification: (id: UUID, path: String)?
+    private var sessionWork: Task<Void, Never>?
+    private var fixture: Bool { model?.originalFixture == true }
+
+    func attach(_ model: AppModel) { self.model = model }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .systemBackground
+        guard let url = Bundle.main.url(forResource: "OriginalRuntime", withExtension: "js"), let source = try? String(contentsOf: url, encoding: .utf8) else {
+            failure = "В сборке отсутствует подключение нативных функций. Переустанови последнюю IPA."; loading = false; return
+        }
+        runtime = source
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .default()
+        configuration.allowsInlineMediaPlayback = true
+        configuration.mediaTypesRequiringUserActionForPlayback = []
+        configuration.userContentController.add(WeakOriginalMessageHandler(self), name: "vvNative")
+        if !fixture, let session = model?.session {
+            let json = Self.json(["token": session.token, "courierID": session.courierID])
+            // This migration script is removed immediately after the first boot.
+            // Logging out on the website must never reimport an old token.
+            let seed = "(() => { const seed = \(json); if (!localStorage.getItem('CapacitorStorage.token_courier')) { localStorage.setItem('CapacitorStorage.token_courier', seed.token); } })();"
+            configuration.userContentController.addUserScript(WKUserScript(source: seed, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        }
+        configuration.userContentController.addUserScript(WKUserScript(source: runtime, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.navigationDelegate = self; webView.uiDelegate = self
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
+        webView.allowsBackForwardNavigationGestures = true
+        webView.isOpaque = true; webView.backgroundColor = .systemBackground
+        webView.accessibilityIdentifier = "original.web"
+        webView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(webView)
+        NSLayoutConstraint.activate([webView.leadingAnchor.constraint(equalTo: view.leadingAnchor), webView.trailingAnchor.constraint(equalTo: view.trailingAnchor), webView.topAnchor.constraint(equalTo: view.topAnchor), webView.bottomAnchor.constraint(equalTo: view.bottomAnchor)])
+        configureHardware()
+        if fixture && ProcessInfo.processInfo.arguments.contains("--original-offline-ui-testing") {
+            failure = "Проверка без сети."; loading = false; return
+        }
+        if fixture {
+            guard let html = Bundle.main.url(forResource: "OriginalFixture", withExtension: "html") else {
+                failure = "Отсутствует проверочный экран."; loading = false; return
+            }
+            webView.loadFileURL(html, allowingReadAccessTo: html.deletingLastPathComponent())
+        } else { webView.load(URLRequest(url: URL(string: "https://courier.vkusvill.ru/start")!)) }
+    }
+
+    private func configureHardware() {
+        hardware?.invalidate()
+        hardware = OriginalCameraBridge(presenter: self, webView: webView)
+        hardware?.reply = { [weak self] callbackID, success, data, error, keepAlive in
+            var value: [String: Any] = ["callbackID": callbackID, "success": success, "keepAlive": keepAlive]
+            if let data { value["data"] = data }; if let error { value["error"] = error }
+            self?.send(value)
+        }
+    }
+
+    func openWheel() { if !wheelOpen { wheelOpen = true }; evaluate("window.__vvCompanion?.setWheel(true)") }
+    func closeWheel() { if wheelOpen { wheelOpen = false }; evaluate("window.__vvCompanion?.setWheel(false)") }
+    func navigate(_ path: String) {
+        guard path.hasPrefix("/"), !path.hasPrefix("//"), !path.contains("\\") else { return }
+        evaluate("window.__vvCompanion?.navigate(\(Self.json(path)))")
+    }
+    func reload() { guard webView != nil else { return }; failure = nil; loading = true; webView.reload() }
+    func openNotification() {
+        guard let target = model?.notificationTarget, target.courierID == model?.session?.courierID else { return }
+        presented = nil
+        closeWheel()
+        var destination = URLComponents()
+        destination.path = "/order"
+        destination.queryItems = [URLQueryItem(name: "type", value: target.kind == .ready ? "done" : "prepare"), URLQueryItem(name: "id_parcel", value: target.parcelID)]
+        guard let path = destination.string else { return }
+        pendingNotification = (target.id, path)
+        if runtimeReady { navigate(path) }
+    }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.frameInfo.isMainFrame, trusted(message.frameInfo.request.url),
+              let body = message.body as? [String: Any], let kind = body["kind"] as? String,
+              let incomingDocument = body["documentID"] as? String, incomingDocument.count < 150 else { return }
+        if kind == "boot" || documentID == nil { documentID = incomingDocument }
+        guard documentID == incomingDocument else { return }
+        // Token migration runs once; future navigations get only the bridge.
+        if kind == "boot" || kind == "ready" {
+            userContentController.removeAllUserScripts()
+            userContentController.addUserScript(WKUserScript(source: runtime, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        }
+        switch kind {
+        case "ready": loading = false; failure = nil; runtimeReady = true; openNotification()
+        case "navigation":
+            let visible = body["barVisible"] as? Bool ?? false
+            if visible != barVisible { barVisible = visible }
+            let height = CGFloat(number(body["barHeight"]))
+            if height.isFinite, (44...150).contains(height), abs(height - barHeight) > 0.5 { barHeight = height }
+            if let pendingNotification, body["path"] as? String == pendingNotification.path,
+               model?.notificationTarget?.id == pendingNotification.id {
+                model?.notificationTarget = nil; self.pendingNotification = nil
+            }
+        case "action":
+            switch body["action"] as? String {
+            case "wheel": openWheel()
+            case "courier": closeWheel()
+            case "income": presented = .income
+            case "notifications": presented = .notifications
+            case "telegram": presented = .telegram
+            case "settings": presented = .settings
+            default: break
+            }
+        case "plugin":
+            guard let plugin = body["plugin"] as? String, let method = body["method"] as? String,
+                  let callbackID = body["callbackID"] as? String, callbackID.hasPrefix(incomingDocument + ":"), callbackID.count < 200 else { return }
+            let handled = hardware?.handle(plugin: plugin, method: method, options: body["options"] as? [String: Any] ?? [:], callbackID: callbackID) ?? false
+            if !handled { send(["callbackID": callbackID, "success": false, "error": "Эта нативная функция пока не поддерживается.", "code": "UNIMPLEMENTED"]) }
+        case "session":
+            if let token = body["token"] as? String, let id = body["courierID"] as? String, !token.isEmpty, token.count < 32_768, !id.isEmpty, id.allSatisfy(\.isNumber) {
+                candidateSession = Session(token: token, courierID: id)
+                if pendingToken == token { accept(candidateSession!) }
+            }
+        case "token": observeToken(body["token"] as? String ?? "")
+        case "account": observeAccount(body)
+        default: break
+        }
+    }
+
+    private func observeToken(_ token: String) {
+        guard !fixture, let model, token.count < 32_768 else { return }
+        pendingToken = token
+        if token.isEmpty {
+            sessionWork?.cancel(); candidateSession = nil
+            if model.session != nil { model.logout() }
+            return
+        }
+        if model.session?.token == token { return }
+        // The website may have switched accounts. Stop old-account polling and
+        // reports immediately, even if discovering the new profile later fails.
+        model.logout(); presented = nil; pendingNotification = nil
+        if let candidateSession, candidateSession.token == token { accept(candidateSession); return }
+        sessionWork?.cancel()
+        // Recover an existing website session without sending an SMS. The server
+        // profile, not an old account ID, determines ownership of an imported token.
+        sessionWork = Task { [weak self] in
+            do {
+                let profile = try await CourierAPI(session: Session(token: token, courierID: "unresolved")).profile()
+                guard let self, !Task.isCancelled, self.pendingToken == token else { return }
+                let id = firstAddressText(profile["id_courier"], profile["courier_id"], profile["id"])
+                guard !id.isEmpty, id.allSatisfy(\.isNumber) else { return }
+                self.accept(Session(token: token, courierID: id))
+            } catch { /* The website presents its own login state; never request a code here. */ }
+        }
+    }
+    private func accept(_ session: Session) {
+        guard !fixture, pendingToken == session.token, let model else { return }
+        do {
+            if model.session?.token != session.token || model.session?.courierID != session.courierID { try model.finishLogin(session) }
+            Task { await model.bootstrap() }
+        } catch { model.handle(error) }
+    }
+    private func observeAccount(_ body: [String: Any]) {
+        guard !fixture, let model, let token = body["token"] as? String, !token.isEmpty,
+              token == pendingToken, let data = body["data"] as? [String: Any] else { return }
+        if model.session == nil, body["endpoint"] as? String == "/v1/courier/courier" {
+            let id = firstAddressText(data["id_courier"], data["courier_id"], data["id"])
+            if !id.isEmpty, id.allSatisfy(\.isNumber) { accept(Session(token: token, courierID: id)) }
+        }
+        guard model.session?.token == token else { return }
+        switch body["endpoint"] as? String {
+        case "/v1/courier/activity":
+            let status = string(data["res"])
+            if status == "0" || status == "1" { model.active = status == "1"; model.shiftKnown = true }
+        case "/v1/courier/courier": model.profile = data
+        case "/v1/courier/shops":
+            if let shops = data["shops"] as? [[String: Any]] { model.shops = shops.filter { !truth($0["invisible"]) }.compactMap(Shop.init) }
+        default: break
+        }
+    }
+    private func trusted(_ url: URL?) -> Bool {
+        guard let url else { return false }
+        if url.scheme == "https", url.host == "courier.vkusvill.ru" { return true }
+        return fixture && url.isFileURL && url.path.hasPrefix(Bundle.main.bundlePath + "/")
+    }
+    private func evaluate(_ source: String) { guard webView != nil else { return }; webView.evaluateJavaScript(source, completionHandler: nil) }
+    private func send(_ message: [String: Any]) {
+        // The receiver is synchronous. The classic API also avoids the
+        // libswiftWebKit overlay launch failure in iOS 18.5 simulators.
+        evaluate("window.__vvNativeReceive?.(\(Self.json(message)))")
+    }
+    fileprivate static func json(_ value: Any) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed, .sortedKeys]), let text = String(data: data, encoding: .utf8) else { return "null" }
+        return text
+    }
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        documentID = nil; runtimeReady = false; configureHardware(); loading = true; failure = nil
+    }
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { loading = false; failure = nil }
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { failed(error) }
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { failed(error) }
+    private func failed(_ error: Error) { if (error as NSError).code != NSURLErrorCancelled { loading = false; failure = error.localizedDescription } }
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { hardware?.invalidate(); reload() }
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
+        if navigationAction.targetFrame?.isMainFrame != false, !trusted(url), url.scheme != "about" {
+            decisionHandler(.cancel); openExternal(url); return
+        }
+        decisionHandler(.allow)
+    }
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if let url = navigationAction.request.url { if trusted(url) { webView.load(navigationAction.request) } else { openExternal(url) } }
+        return nil
+    }
+    private func openExternal(_ url: URL) {
+        if url.scheme == "https" || url.scheme == "http" { present(SFSafariViewController(url: url), animated: true) }
+        else if ["tel", "mailto", "tg", "vkusvill", "sberbankonline", "bank100000000111"].contains(url.scheme ?? "") { UIApplication.shared.open(url) }
+    }
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+        let alert = UIAlertController(title: "ВкусВилл", message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "Понятно", style: .default) { _ in completionHandler() }); present(alert, animated: true)
+    }
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+        let alert = UIAlertController(title: "ВкусВилл", message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "Отмена", style: .cancel) { _ in completionHandler(false) })
+        alert.addAction(UIAlertAction(title: "Подтвердить", style: .default) { _ in completionHandler(true) }); present(alert, animated: true)
+    }
+}
+
+private final class WeakOriginalMessageHandler: NSObject, WKScriptMessageHandler {
+    weak var target: OriginalCourierController?
+    init(_ target: OriginalCourierController) { self.target = target }
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) { target?.userContentController(userContentController, didReceive: message) }
+}
