@@ -33,10 +33,8 @@ struct AccountView: View {
             CourierCard("Оформление") {
                 NavigationLink { AppearanceSettingsView() } label: { CourierMenuRow(title: "Внешний вид", symbol: "paintpalette") }.accessibilityIdentifier("profile.appearance")
             }
-            CourierCard("Уведомления") {
-                NavigationLink { ExpressNotificationSettingsView() } label: { CourierMenuRow(title: "Экспрессы на смене", symbol: "bell") }.accessibilityIdentifier("profile.notifications")
-                Divider()
-                NavigationLink { TelegramNotificationStatusView() } label: { CourierMenuRow(title: "Бот в Telegram", symbol: "paperplane") }.accessibilityIdentifier("profile.telegram")
+            CourierCard("Итоги") {
+                NavigationLink { IncomeView() } label: { CourierMenuRow(title: "Итоги смены", symbol: "chart.bar") }.accessibilityIdentifier("profile.income")
             }
             CourierCard("Покупки") {
                 Button { CustomerVkusVillApp.open() } label: { CourierMenuRow(title: "Открыть ВкусВилл · баллы", symbol: "creditcard.and.123") }.buttonStyle(.plain).accessibilityIdentifier("profile.customer-app")

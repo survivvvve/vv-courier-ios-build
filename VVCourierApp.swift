@@ -7,6 +7,8 @@ struct VVCourierApp: App {
     @AppStorage("appearance") private var appearance = AppAppearance.system.rawValue
     @AppStorage(AppTheme.storageKey) private var palette = AppTheme.codex.rawValue
     init() {
+        // Retire the old Telegram connection locally before any monitoring starts.
+        _ = TelegramNotificationPreferences.shared
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--ui-testing") { fputs("VV startup: App init\n", stderr) }
         #endif

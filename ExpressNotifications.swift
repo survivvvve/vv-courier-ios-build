@@ -50,7 +50,7 @@ final class ExpressNotificationPreferences: ObservableObject {
     }
     var allowed: Bool { [.authorized, .provisional, .ephemeral].contains(authorization) }
     var nativeMonitoringEnabled: Bool { preferences.enabled && (preferences.created || preferences.ready) }
-    var anyMonitoringEnabled: Bool { nativeMonitoringEnabled || TelegramNotificationPreferences.shared.monitoringEnabled }
+    var anyMonitoringEnabled: Bool { nativeMonitoringEnabled }
     func refreshAuthorization() async {
         let value = await notifications.notificationSettings().authorizationStatus
         if authorization != value { authorization = value }
@@ -60,7 +60,6 @@ final class ExpressNotificationPreferences: ObservableObject {
         catch { self.error = "Не удалось запросить уведомления: " + error.localizedDescription }
     }
     func configure(session: Session?, shops: [Int], demo: Bool, known: Bool, active: Bool) {
-        TelegramNotificationCenter.shared.configure(session: session, shops: shops, demo: demo, known: known, active: active)
         guard !demo, let session else { if !context.isEmpty { endObservation() }; status = demo ? "Демо: реальные заказы не проверяются" : "Войди в ВВ для уведомлений"; return }
         let scope = (CourierAPI(session: session).sessionFingerprint ?? session.courierID) + ":" + Set(shops).sorted().map(String.init).joined(separator: ",")
         if context != scope {
@@ -74,7 +73,6 @@ final class ExpressNotificationPreferences: ObservableObject {
         if known && !active { stopShift() }
     }
     func endObservation() {
-        TelegramNotificationCenter.shared.endObservation()
         let oldEpoch = ledger.epoch
         generation = UUID(); pollTask?.cancel(); pollTask = nil; context = ""; pending = []; freshActiveAt = .distantPast; clearForeground()
         observedShift = nil; lastCheckedAt = nil; testStatus = nil; status = "Войди в ВВ для уведомлений"
@@ -84,7 +82,6 @@ final class ExpressNotificationPreferences: ObservableObject {
         BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.backgroundID)
     }
     private func stopShift() {
-        TelegramNotificationCenter.shared.stopShift()
         let oldEpoch = ledger.epoch
         generation = UUID(); pollTask?.cancel(); pollTask = nil
         pending = []; freshActiveAt = .distantPast; clearForeground(); observedShift = false
@@ -93,18 +90,15 @@ final class ExpressNotificationPreferences: ObservableObject {
         removeExpressNotifications(epoch: oldEpoch)
         BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.backgroundID)
     }
-    /// Pausing native notices must not stop Telegram's shared VV polling.
+    /// Disabled native notices must not leave an independent order poll running.
     func pauseDelivery() {
         let oldEpoch = ledger.epoch
         pending = []; clearForeground()
         status = "Уведомления об экспрессах выключены"
         if ledger.active { ledger.endShift(); persist() }
         removeExpressNotifications(epoch: oldEpoch)
-        if !TelegramNotificationPreferences.shared.monitoringEnabled {
-            generation = UUID(); pollTask?.cancel(); pollTask = nil; freshActiveAt = .distantPast
-            TelegramNotificationCenter.shared.pauseDelivery()
-            BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.backgroundID)
-        }
+        generation = UUID(); pollTask?.cancel(); pollTask = nil; freshActiveAt = .distantPast
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.backgroundID)
     }
     private func persist() {
         if let data = try? JSONEncoder().encode(ledger) { UserDefaults.standard.set(data, forKey: ledgerKey); lastSave = Date() }
@@ -183,8 +177,7 @@ final class ExpressNotificationPreferences: ObservableObject {
                 pending = []; clearForeground()
                 status = "На смене: уведомления об экспрессах выключены"
             }
-            // Native foreground/system notices must not wait for Telegram's
-            // network request: otherwise their 30-second freshness can expire.
+            // Native foreground/system notices use the freshly confirmed shift.
             if nativeEnabled && allowed {
                 let delivered = Set(await notifications.deliveredNotifications().map { $0.request.identifier })
                 var failed: [ExpressOrderEvent] = []
@@ -210,24 +203,13 @@ final class ExpressNotificationPreferences: ObservableObject {
                 pending = failed
                 if failed.isEmpty { error = nil }
             } else { pending = []; error = nil }
-            let telegramActive = try await TelegramNotificationCenter.shared.consume(
-                session: session, shops: shops, assembling: snapshots.0.parcels, ready: snapshots.1.parcels,
-                quiet: quiet, confirmedAt: freshActiveAt, isCurrent: current,
-                confirmActive: {
-                    guard current() else { throw CancellationError() }
-                    let active = try await client.activeShift()
-                    guard current() else { throw CancellationError() }
-                    return active
-                })
             guard current() else { return nil }
-            guard telegramActive else { stopShift(); error = nil; return false }
             scheduleBackgroundRefresh()
             return true
         } catch is CancellationError { return nil }
         catch {
             if current() {
                 freshActiveAt = .distantPast; observedShift = nil; clearForeground()
-                if TelegramNotificationPreferences.shared.monitoringEnabled { TelegramNotificationCenter.shared.suspend("Нет свежих данных ВВ: отправка в Telegram приостановлена") }
                 if (error as? CourierError)?.statusCode == 401 {
                     expiredCourierID = session.courierID; stopShift()
                     self.error = "Сессия ВВ завершена. Войди заново для уведомлений."
@@ -339,7 +321,7 @@ final class ExpressNotificationPreferences: ObservableObject {
                       let data = UserDefaults.standard.data(forKey: "express.notifications.scope.v1"),
                       let scope = try? JSONDecoder().decode(SavedScope.self, from: data), scope.courierID == session.courierID else { task.setTaskCompleted(success: true); return }
                 await self.refreshAuthorization()
-                guard (self.nativeMonitoringEnabled && self.allowed) || TelegramNotificationPreferences.shared.monitoringEnabled else { task.setTaskCompleted(success: true); return }
+                guard self.nativeMonitoringEnabled && self.allowed else { task.setTaskCompleted(success: true); return }
                 self.configure(session: session, shops: scope.shops, demo: false, known: false, active: false)
                 let result = await self.poll(session: session, shops: scope.shops, backgroundToken: backgroundToken)
                 self.persist(); self.scheduleBackgroundRefresh(); task.setTaskCompleted(success: result != nil)
@@ -358,8 +340,7 @@ final class ExpressNotificationPreferences: ObservableObject {
         guard !uiPreviewActive else { return }
         #endif
         let nativeBackground = nativeMonitoringEnabled && allowed && ledger.active
-        let telegramBackground = TelegramNotificationPreferences.shared.monitoringEnabled && TelegramNotificationCenter.shared.active
-        guard nativeBackground || telegramBackground,
+        guard nativeBackground,
               UIApplication.shared.backgroundRefreshStatus == .available else { return }
         BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.backgroundID)
         let request = BGAppRefreshTaskRequest(identifier: Self.backgroundID)
@@ -401,8 +382,7 @@ final class ExpressNotificationPreferences: ObservableObject {
     @Environment(\.scenePhase) private var phase
     @StateObject private var center = ExpressNotificationCenter.shared
     @StateObject private var preferences = ExpressNotificationPreferences.shared
-    @StateObject private var telegramPreferences = TelegramNotificationPreferences.shared
-    private var key: String { "\(model.shopScopeKey):\(model.active):\(model.shiftKnown):\(model.sessionExpired):\(phase == .active):\(preferences.enabled):\(preferences.created):\(preferences.ready):\(telegramPreferences.enabled):\(telegramPreferences.created):\(telegramPreferences.ready):\(telegramPreferences.onlyExpress):\(telegramPreferences.revision)" }
+    private var key: String { "\(model.shopScopeKey):\(model.active):\(model.shiftKnown):\(model.sessionExpired):\(phase == .active):\(preferences.enabled):\(preferences.created):\(preferences.ready)" }
     func body(content: Content) -> some View {
         content.task(id: key) {
             #if DEBUG
@@ -417,7 +397,7 @@ final class ExpressNotificationPreferences: ObservableObject {
             guard phase == .active, !model.demo, let session = model.session, !model.sessionExpired,
                   center.anyMonitoringEnabled else { return }
             await center.refreshAuthorization()
-            var quiet = preferences.enabled && (preferences.created || preferences.ready) ? center.needsQuietResume() : TelegramNotificationCenter.shared.needsQuietResume(), failures = 0
+            var quiet = center.needsQuietResume(), failures = 0
             while !Task.isCancelled && model.identity == owner {
                 if let active = await center.poll(session: session, shops: model.api.shopNumbers, quiet: quiet) {
                     guard !Task.isCancelled, model.identity == owner else { return }
@@ -461,9 +441,6 @@ struct ExpressNotificationSettingsView: View {
                 Toggle("Оформлен экспресс", isOn: $preferences.created).disabled(!preferences.enabled)
                 Toggle("Экспресс готов", isOn: $preferences.ready).disabled(!preferences.enabled)
                 Text("Только во время активной смены ВВ и для выбранных магазинов.").font(.caption).foregroundStyle(Palette.muted)
-            }
-            CourierCard {
-                NavigationLink { TelegramNotificationStatusView() } label: { CourierMenuRow(title: "Бот в Telegram", symbol: "paperplane") }.accessibilityIdentifier("notifications.telegram")
             }
             CourierCard("Разрешение iPhone") {
                 Text(center.allowed ? "Уведомления разрешены" : center.authorization == .denied ? "Уведомления выключены в iPhone" : "Разрешение ещё не запрошено").font(.subheadline)

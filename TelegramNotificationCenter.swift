@@ -39,8 +39,11 @@ import SwiftUI
 /// Delivery is fed only by ExpressNotificationCenter's already completed VV
 /// snapshots. It owns no VV polling task, login, server or background audio.
 @MainActor final class TelegramNotificationCenter: ObservableObject {
+    // Defense in depth for old saved configuration or a stale direct caller.
+    // Express monitoring no longer constructs or calls this integration.
+    private static let integrationEnabled = false
     static let shared = TelegramNotificationCenter()
-    @Published private(set) var status = "Бот в Telegram выключен"
+    @Published private(set) var status = "Интеграция Telegram отключена"
     @Published private(set) var lastSentAt: Date?
     private let preferences: TelegramNotificationPreferences
     private let defaults: UserDefaults
@@ -69,14 +72,13 @@ import SwiftUI
          }) {
         self.defaults = defaults; self.preferences = preferences ?? .shared
         self.sessionProvider = sessionProvider; self.sender = sender
-        let saved = defaults.data(forKey: storageKey).flatMap { try? JSONDecoder().decode(SavedState.self, from: $0) }
-        ledger = saved?.ledger ?? TelegramOrderLedger()
-        attempted = saved?.attempted ?? [:]
-        savedFingerprint = saved?.fingerprint ?? ""
-        lastSentAt = saved?.lastSentAt
+        ledger = TelegramOrderLedger()
+        attempted = [:]
+        savedFingerprint = ""
+        defaults.removeObject(forKey: storageKey)
     }
     var active: Bool { ledger.active }
-    var monitoringEnabled: Bool { preferences.monitoringEnabled }
+    var monitoringEnabled: Bool { Self.integrationEnabled && preferences.monitoringEnabled }
     func needsQuietResume(at date: Date = Date()) -> Bool {
         needsBaseline || ExpressNotificationDelivery.needsQuietResume(lastObservedAt: ledger.lastObservedAt, at: date)
     }
@@ -85,6 +87,7 @@ import SwiftUI
         return "\(config.botID)|\(config.chat.chatID)|\(config.chat.threadID.map(String.init) ?? "")|\(preferences.revision)"
     }
     func configure(session: Session?, shops: [Int], demo: Bool, known: Bool, active: Bool) {
+        guard Self.integrationEnabled else { endObservation(reason: "Интеграция Telegram отключена"); return }
         guard !demo, let session else {
             endObservation(reason: demo ? "Демо: бот не получает реальные заказы" : "Войди в ВВ для отправки заказов")
             return
@@ -140,7 +143,7 @@ import SwiftUI
     func consume(session: Session, shops: [Int], assembling: [Parcel], ready: [Parcel], quiet: Bool,
                  confirmedAt: Date, isCurrent: () -> Bool,
                  confirmActive: () async throws -> Bool) async throws -> Bool {
-        guard preferences.monitoringEnabled, !context.isEmpty, matches(session), isCurrent(), !Task.isCancelled else { return true }
+        guard Self.integrationEnabled, preferences.monitoringEnabled, !context.isEmpty, matches(session), isCurrent(), !Task.isCancelled else { return true }
         let owner = generation, revision = preferences.revision, configKey = configurationKey()
         func current() -> Bool {
             !Task.isCancelled && generation == owner && preferences.revision == revision && configurationKey() == configKey

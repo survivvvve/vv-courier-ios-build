@@ -11,7 +11,6 @@ struct OriginalCourierShell: View {
         GeometryReader { geometry in
             ZStack(alignment: .top) {
                 OriginalCourierSurface(controller: controller, model: model)
-                    .accessibilityHidden(controller.runtimeFailed)
                 if controller.wheelOpen {
                     NavigationStack {
                         WheelView()
@@ -53,16 +52,6 @@ struct OriginalCourierShell: View {
                 case .income:
                     IncomeView(onClose: { controller.presented = nil })
                         .modifier(CompanionNotificationOverlay())
-                case .notifications:
-                    NavigationStack {
-                        ExpressNotificationSettingsView()
-                            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Готово") { controller.presented = nil }.accessibilityIdentifier("original.notifications.close") } }
-                    }.modifier(CompanionNotificationOverlay())
-                case .telegram:
-                    NavigationStack {
-                        TelegramNotificationStatusView()
-                            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Готово") { controller.presented = nil }.accessibilityIdentifier("original.telegram.close") } }
-                    }.modifier(CompanionNotificationOverlay())
                 case .settings:
                     NavigationStack { CompanionSettingsView().toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Готово") { controller.presented = nil } } } }.modifier(CompanionNotificationOverlay())
                 case .recoveryOrders:
@@ -103,6 +92,7 @@ private struct OriginalWebRecoveryView: View {
                 copied = true
             }.font(.subheadline).accessibilityIdentifier("original.recovery.copy")
         }.padding(24).frame(maxWidth: .infinity, maxHeight: .infinity).background(Palette.background)
+            .accessibilityElement(children: .contain)
             .accessibilityIdentifier("original.web.runtime-error")
     }
 }
@@ -132,13 +122,7 @@ private struct CompanionSettingsView: View {
     var body: some View {
         CourierPage("Дополнение к ВВ") {
             CourierCard {
-                NavigationLink { ExpressNotificationSettingsView() } label: { CourierMenuRow(title: "Экспрессы на смене", symbol: "bell") }
-                Divider()
-                NavigationLink { IncomeView() } label: { CourierMenuRow(title: "Итоги заработка", symbol: "chart.bar") }
-                Divider()
-                NavigationLink { TelegramNotificationStatusView() } label: { CourierMenuRow(title: "Бот в Telegram", symbol: "paperplane") }.accessibilityIdentifier("companion.telegram")
-                Divider()
-                Button { CustomerVkusVillApp.open() } label: { CourierMenuRow(title: "ВкусВилл · потратить баллы", symbol: "creditcard.and.123") }.buttonStyle(.plain)
+                NavigationLink { IncomeView() } label: { CourierMenuRow(title: "Итоги смены", symbol: "chart.bar") }
             }
             CourierCard {
                 NavigationLink { WheelSpeedSettingsView() } label: { CourierMenuRow(title: "Поправка скорости", symbol: "speedometer") }
@@ -154,11 +138,13 @@ private struct CompanionSettingsView: View {
 }
 
 @MainActor final class OriginalCourierController: UIViewController, ObservableObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
-    enum Destination: String, Identifiable { case income, notifications, telegram, settings, recoveryOrders; var id: String { rawValue } }
+    enum Destination: String, Identifiable { case income, settings, recoveryOrders; var id: String { rawValue } }
     @Published var wheelOpen = false
     @Published var loading = true
     @Published var failure: String?
-    @Published private(set) var runtimeFailed = false
+    @Published private(set) var runtimeFailed = false {
+        didSet { webView?.accessibilityElementsHidden = runtimeFailed }
+    }
     @Published var barVisible = false
     @Published var barHeight: CGFloat = 58
     @Published var presented: Destination?
@@ -301,8 +287,6 @@ private struct CompanionSettingsView: View {
             case "wheel": openWheel()
             case "courier": closeWheel()
             case "income": presented = .income
-            case "notifications": presented = .notifications
-            case "telegram": presented = .telegram
             case "settings": presented = .settings
             default: break
             }

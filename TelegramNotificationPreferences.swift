@@ -32,40 +32,25 @@ struct TelegramNotificationConfiguration: Codable, Equatable {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        enabled = defaults.object(forKey: Key.enabled) as? Bool ?? false
-        created = defaults.object(forKey: Key.created) as? Bool ?? true
-        ready = defaults.object(forKey: Key.ready) as? Bool ?? true
-        onlyExpress = defaults.object(forKey: Key.onlyExpress) as? Bool ?? false
-        if let data = defaults.data(forKey: Key.configuration),
-           let value = try? JSONDecoder().decode(TelegramNotificationConfiguration.self, from: data),
-           value.botID > 0, !value.botUsername.isEmpty, !value.chat.chatID.isEmpty,
-           value.chat.threadID.map({ $0 > 0 }) ?? true {
-            configuration = value
-        }
+        // Integration was removed. An upgrade must never revive an old enabled
+        // destination; only Telegram's own local settings and credential change.
+        enabled = false
+        created = true
+        ready = true
+        onlyExpress = false
+        defaults.set(false, forKey: Key.enabled)
+        for key in [Key.created, Key.ready, Key.onlyExpress, Key.configuration] { defaults.removeObject(forKey: key) }
+        defaults.removeObject(forKey: "telegram.notifications.delivery.v1")
+        _ = TelegramNotificationTokenStore.delete()
     }
 
     /// The secret is never copied into UserDefaults or included in configuration.
-    var token: String? { TelegramNotificationTokenStore.read() }
-    var isConfigured: Bool { configuration != nil && token != nil }
-    var monitoringEnabled: Bool { enabled && isConfigured && (created || ready) }
+    var token: String? { nil }
+    var isConfigured: Bool { false }
+    var monitoringEnabled: Bool { false }
 
     func save(token: String, bot: TelegramBotIdentity, chat: TelegramChatIdentity, threadID: Int? = nil) throws {
-        let secret = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !secret.isEmpty else { throw TelegramNotificationPreferenceError("Введи токен бота из BotFather.") }
-        guard bot.id > 0, !bot.username.isEmpty, chat.id != 0, threadID.map({ $0 > 0 }) ?? true else {
-            throw TelegramNotificationPreferenceError("Не удалось сохранить бота или чат. Проверь подключение ещё раз.")
-        }
-        let value = TelegramNotificationConfiguration(botID: bot.id, botUsername: bot.username,
-            chat: TelegramChatDestination(chatID: String(chat.id), threadID: threadID), chatTitle: chat.title)
-        let encoded = try JSONEncoder().encode(value)
-        try TelegramNotificationTokenStore.write(secret)
-        defaults.set(encoded, forKey: Key.configuration)
-        configuration = value
-        storageError = nil
-        updatingConfiguration = true
-        enabled = true
-        updatingConfiguration = false
-        revision &+= 1
+        throw TelegramNotificationPreferenceError("Интеграция Telegram отключена в этой версии приложения.")
     }
 
     /// Disconnects this iPhone only. No Telegram or VV requests are made.
