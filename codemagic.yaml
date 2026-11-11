@@ -1,0 +1,164 @@
+# Put this file at the root of the flat build repository, beside project.yml.
+# Manual builds only; SideStore signs the resulting iPhoneOS IPA on the device.
+workflows:
+  sidestore-unsigned:
+    name: VV Courier 1.2.2 (14) - SideStore
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      xcode: '16.4'
+    scripts:
+      - name: Verify logic and iPhone UI, archive and validate unsigned IPA
+        script: |
+          #!/bin/bash
+          set -euo pipefail
+          mkdir -p build/logs build/qa/crash-reports
+          DEVICE_ID=''
+
+          # Keep diagnostics on both success and failure without replacing the
+          # original test/build exit status with a screenshot/export failure.
+          collect_qa() {
+            local original_status=$?
+            trap - EXIT
+            set +e
+            if [ -d build/ReleaseQA.xcresult ]; then
+              xcrun xcresulttool export attachments --path build/ReleaseQA.xcresult \
+                --output-path build/qa/screenshots > build/logs/attachments.log 2>&1
+              mv build/ReleaseQA.xcresult build/qa/ReleaseQA.xcresult
+            fi
+            if [ -n "$DEVICE_ID" ]; then
+              xcrun simctl io "$DEVICE_ID" screenshot build/qa/last-screen.png \
+                > build/logs/last-screen.log 2>&1
+            fi
+            find "$HOME/Library/Logs/DiagnosticReports" "$HOME/Library/Developer/CoreSimulator/Devices" \
+              -type f \( -name 'VVCourier*.ips' -o -name 'VV Courier*.ips' \
+                -o -name 'CourierUITests*.ips' -o -name 'VVCourier*.crash' \) \
+              -exec cp {} build/qa/crash-reports/ \; 2>/dev/null
+            mkdir -p build/qa/screenshots/posters
+            find "$HOME/Library/Developer/CoreSimulator/Devices" -type f \
+              -name 'VV-Courier-income-*.png' -exec cp {} build/qa/screenshots/posters/ \; 2>/dev/null
+            xcrun simctl shutdown all > build/logs/final-simulator-shutdown.log 2>&1
+            python3 - "$original_status" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+          Path('build/qa/Build-Status.json').write_text(json.dumps({
+              'exit_status': int(sys.argv[1]), 'version': '1.2.2', 'build': '14'
+          }, indent=2) + '\n')
+          PY
+            cp -R build/logs build/qa/logs
+            /usr/bin/ditto -c -k --keepParent build/qa build/VV-Courier-1.2.2-QA.zip
+            exit "$original_status"
+          }
+          trap collect_qa EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+
+          # A failed QA/validation gate must never leave a downloadable IPA.
+          rm -f build/VV-Courier-1.2.2.ipa build/IPA-Validation.json
+          test -f project.yml
+          test -f BuildSupport.zip
+          python3 -m zipfile -e BuildSupport.zip .
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodebuild -version | tee build/logs/xcode-version.log
+          chmod +x Tests/*.sh
+          for suite in \
+            run_core_tests.sh \
+            run_original_runtime_tests.sh \
+            run_original_shift_readiness_tests.sh \
+            run_account_activity_tests.sh \
+            run_original_diagnostics_tests.sh \
+            run_original_web_diagnostics_tests.sh \
+            run_payment_tests.sh \
+            run_inspection_tests.sh \
+            run_wheel_tests.sh \
+            run_express_tests.sh \
+            run_telegram_tests.sh
+          do
+            bash "Tests/$suite" 2>&1 | tee "build/logs/${suite%.sh}.log"
+          done
+          xcodegen generate --spec project.yml 2>&1 | tee build/logs/xcodegen.log
+
+          # Preboot the original device and open Simulator before XCTest to
+          # preserve the Accessibility startup fix. Both classes run serially.
+          DEVICE_ID=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          matches = [d["udid"] for runtime, rows in devices.items()
+                     if runtime.endswith("iOS-18-5") for d in rows
+                     if d["name"] == "iPhone 16 Pro" and d.get("isAvailable", True)]
+          if not matches:
+              raise SystemExit("Required iOS 18.5 iPhone 16 Pro simulator is unavailable")
+          print(matches[0])')
+          xcrun simctl bootstatus "$DEVICE_ID" -b 2>&1 | tee build/logs/simulator-preboot.log
+          open -a Simulator --args -CurrentDeviceUDID "$DEVICE_ID"
+          xcodebuild test -project VVCourier.xcodeproj -scheme VVCourier \
+            -configuration Debug -destination "platform=iOS Simulator,id=$DEVICE_ID" \
+            -destination-timeout 180 -resultBundlePath build/ReleaseQA.xcresult \
+            -parallel-testing-enabled NO -maximum-concurrent-test-simulator-destinations 1 \
+            -only-testing:CourierUITests/OriginalIntegrationTests \
+            -only-testing:CourierUITests/IncomeFeatureTests \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            2>&1 | tee build/logs/iphone-ui-tests.log
+          # The original public-login test keeps its strict 90-second assertion;
+          # no skip, retry, ignore_failure or replacement offline test is used.
+          xcrun simctl io "$DEVICE_ID" screenshot build/qa/ui-passed.png \
+            > build/logs/ui-passed-screenshot.log 2>&1 || true
+          xcrun simctl shutdown all 2>&1 | tee build/logs/simulator-shutdown.log
+
+          xcodebuild archive -project VVCourier.xcodeproj -scheme VVCourier \
+            -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
+            -archivePath build/VVCourier.xcarchive \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            2>&1 | tee build/logs/archive.log
+          mkdir -p build/package/Payload build/validated
+          /usr/bin/ditto build/VVCourier.xcarchive/Products/Applications/VVCourier.app \
+            build/package/Payload/VVCourier.app
+          (
+            cd build/package
+            /usr/bin/ditto -c -k --keepParent Payload ../validated/VV-Courier-1.2.2.ipa
+          )
+          python3 Tests/validate_ipa.py build/validated/VV-Courier-1.2.2.ipa \
+            2>&1 | tee build/logs/ipa-validation.log
+          python3 - <<'PY' 2>&1 | tee build/logs/macho-validation.log
+          import json
+          from pathlib import Path
+          import subprocess
+          app = Path('build/package/Payload/VVCourier.app')
+          forbidden = 'libswiftWebKit.dylib'
+          assert not list(app.rglob(forbidden)), 'Forbidden libswiftWebKit.dylib is bundled'
+          magic = {bytes.fromhex(h) for h in (
+              'feedface', 'cefaedfe', 'feedfacf', 'cffaedfe',
+              'cafebabe', 'bebafeca', 'cafebabf', 'bfbafeca')}
+          binaries = 0
+          for path in app.rglob('*'):
+              if not path.is_file():
+                  continue
+              with path.open('rb') as stream:
+                  if stream.read(4) not in magic:
+                      continue
+              architectures = subprocess.check_output(['xcrun', 'lipo', '-archs', str(path)], text=True).split()
+              assert architectures == ['arm64'], f'Wrong device architecture in {path.name}: {architectures}'
+              links = subprocess.check_output(['xcrun', 'otool', '-L', str(path)], text=True)
+              assert forbidden not in links, f'Forbidden WebKit Swift overlay dependency in {path.name}'
+              binaries += 1
+          assert binaries > 0, 'No arm64 Mach-O executable found'
+          report = Path('build/validated/IPA-Validation.json')
+          result = json.loads(report.read_text())
+          result.update({'architectures': ['arm64'], 'mach_o_binaries': binaries,
+                         'libswiftWebKit_dependency': False, 'unsigned_for_sidestore': True})
+          report.write_text(json.dumps(result, indent=2) + '\n')
+          print(json.dumps(result, indent=2))
+          PY
+          mv build/validated/VV-Courier-1.2.2.ipa build/VV-Courier-1.2.2.ipa
+          mv build/validated/IPA-Validation.json build/IPA-Validation.json
+    artifacts:
+      - build/VV-Courier-1.2.2.ipa
+      # Codemagic includes raw JSON in its general artifacts ZIP; IPA remains a
+      # separate download. No external artifact service or credentials are used.
+      - build/IPA-Validation.json
+      - build/VV-Courier-1.2.2-QA.zip
