@@ -22,7 +22,7 @@ jobs:
     runs-on: ${{ inputs.build_runner || 'macos-15' }}
     env:
       DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install project generator
@@ -34,6 +34,8 @@ jobs:
           chmod +x Tests/*.sh
           bash Tests/run_core_tests.sh
           bash Tests/run_original_runtime_tests.sh
+          bash Tests/run_original_shift_readiness_tests.sh
+          bash Tests/run_account_activity_tests.sh
           bash Tests/run_original_diagnostics_tests.sh
           bash Tests/run_original_web_diagnostics_tests.sh
           bash Tests/run_payment_tests.sh
@@ -84,6 +86,9 @@ jobs:
           fi
           mkdir -p build/screenshots/posters
           find "$HOME/Library/Developer/CoreSimulator/Devices" -type f -name 'VV-Courier-income-*.png' -exec cp {} build/screenshots/posters/ \;
+      - name: Stop simulator before device archive
+        if: always()
+        run: xcrun simctl shutdown all
       - name: Archive unsigned app
         run: >-
           xcodebuild -project VVCourier.xcodeproj -scheme VVCourier
@@ -97,21 +102,21 @@ jobs:
           mkdir -p build/package/Payload
           cp -R build/VVCourier.xcarchive/Products/Applications/VVCourier.app build/package/Payload/
           cd build/package
-          /usr/bin/ditto -c -k --keepParent Payload ../VV-Courier-1.2.1.ipa
+          /usr/bin/ditto -c -k --keepParent Payload ../VV-Courier-1.2.2.ipa
       - name: Validate distributable IPA
-        run: python3 Tests/validate_ipa.py build/VV-Courier-1.2.1.ipa
+        run: python3 Tests/validate_ipa.py build/VV-Courier-1.2.2.ipa
       - uses: actions/upload-artifact@v4
         with:
-          name: VV-Courier-1.2.1-SideStore
+          name: VV-Courier-1.2.2-SideStore
           path: |
-            build/VV-Courier-1.2.1.ipa
+            build/VV-Courier-1.2.2.ipa
             build/IPA-Validation.json
           if-no-files-found: error
           retention-days: 14
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: VV-Courier-1.2.1-QA
+          name: VV-Courier-1.2.2-QA
           path: |
             build/screenshots
             build/ReleaseQA.xcresult
