@@ -10,7 +10,8 @@ struct OriginalCourierShell: View {
     var body: some View {
         GeometryReader { geometry in
             ZStack(alignment: .top) {
-                OriginalCourierSurface(controller: controller, model: model)
+                OriginalCourierSurface(controller: controller, model: model, safeArea: geometry.safeAreaInsets)
+                    .ignoresSafeArea(.container, edges: .all)
                 if controller.wheelOpen {
                     NavigationStack {
                         WheelView()
@@ -25,8 +26,8 @@ struct OriginalCourierShell: View {
                                 }
                             }
                     }
-                    .frame(height: max(0, geometry.size.height - (controller.barVisible ? controller.barHeight : 0)))
-                    .background(Palette.background)
+                    .frame(height: max(0, geometry.size.height - (controller.barVisible ? max(0, controller.barHeight - geometry.safeAreaInsets.bottom) : 0)))
+                    .background { Rectangle().fill(Palette.background).ignoresSafeArea(.container, edges: [.top, .horizontal]) }
                     .accessibilityIdentifier("original.wheel.page")
                 }
                 if controller.runtimeFailed && !controller.wheelOpen {
@@ -127,9 +128,15 @@ private struct OriginalWebRecoveryView: View {
 private struct OriginalCourierSurface: UIViewControllerRepresentable {
     let controller: OriginalCourierController
     let model: AppModel
-    func makeUIViewController(context: Context) -> OriginalCourierController { controller.attach(model); return controller }
+    let safeArea: EdgeInsets
+    func makeUIViewController(context: Context) -> OriginalCourierController {
+        controller.attach(model); controller.updateWebsiteInsets(safeArea); return controller
+    }
     func updateUIViewController(_ controller: OriginalCourierController, context: Context) {
-        Task { @MainActor [weak controller] in controller?.updateWebsiteAppearance() }
+        Task { @MainActor [weak controller] in
+            controller?.updateWebsiteInsets(safeArea)
+            controller?.updateWebsiteAppearance()
+        }
     }
 }
 
@@ -176,12 +183,30 @@ private struct CompanionSettingsView: View {
     private var candidateSession: Session?
     private var runtime = ""
     private var runtimeReady = false
+    private var websiteInsets = ["top": 0.0, "bottom": 0.0, "left": 0.0, "right": 0.0]
+    private var websiteCanvas: UIColor?
     private var pendingNotification: (id: UUID, path: String)?
     private var sessionWork: Task<Void, Never>?
     private var fixture: Bool { model?.originalFixture == true }
     var showsNativeSurface: Bool { wheelOpen || runtimeFailed || failure != nil || presented != nil }
 
     func attach(_ model: AppModel) { self.model = model }
+
+    func updateWebsiteInsets(_ insets: EdgeInsets) {
+        func value(_ number: CGFloat) -> Double { number.isFinite ? Double(min(200, max(0, number))) : 0 }
+        // Window insets describe the island/home indicator, not the keyboard's
+        // much larger SwiftUI avoidance region when an input has focus.
+        let physical = viewIfLoaded?.window?.safeAreaInsets
+        let next = ["top": value(physical?.top ?? insets.top), "bottom": value(physical?.bottom ?? insets.bottom),
+                    "left": value(physical?.left ?? insets.leading), "right": value(physical?.right ?? insets.trailing)]
+        guard next != websiteInsets else { return }
+        websiteInsets = next
+        if runtimeReady { sendWebsiteInsets() }
+    }
+
+    private func sendWebsiteInsets() {
+        evaluate("window.__vvCompanion?.setSafeArea(\(Self.json(websiteInsets)))")
+    }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
@@ -227,7 +252,11 @@ private struct CompanionSettingsView: View {
               let shiftSource = try? String(contentsOf: shiftURL, encoding: .utf8) else {
             failure = "В сборке отсутствует проверка готовности смены. Переустанови последнюю IPA."; loading = false; return
         }
-        runtime = diagnosticSource + "\n" + shiftSource + "\n" + source
+        guard let cashURL = Bundle.main.url(forResource: "OriginalCashChange", withExtension: "js"),
+              let cashSource = try? String(contentsOf: cashURL, encoding: .utf8) else {
+            failure = "В сборке отсутствует подсчёт сдачи. Переустанови последнюю IPA."; loading = false; return
+        }
+        runtime = diagnosticSource + "\n" + shiftSource + "\n" + cashSource + "\n" + source
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
         configuration.allowsInlineMediaPlayback = true
@@ -295,7 +324,9 @@ private struct CompanionSettingsView: View {
 
     private func refreshPageBackground() {
         guard let webView else { return }
-        let color = (webView.underPageBackgroundColor ?? UIColor.systemBackground).resolvedColor(with: webView.traitCollection)
+        // Ionic themes its child ion-app, while the HTML canvas can stay white.
+        // Use the visible app's reported canvas before WebKit's under-page value.
+        let color = (websiteCanvas ?? webView.underPageBackgroundColor ?? UIColor.systemBackground).resolvedColor(with: webView.traitCollection)
         if !pageBackground.isEqual(color) { pageBackground = color }
         view.backgroundColor = color
         webView.backgroundColor = color
@@ -371,7 +402,12 @@ private struct CompanionSettingsView: View {
                 loading = false
                 barVisible = false
             }
-        case "ready": loading = false; failure = nil; runtimeReady = true; openNotification()
+        case "ready": loading = false; failure = nil; runtimeReady = true; sendWebsiteInsets(); openNotification()
+        case "appearance":
+            guard let rgb = body["background"] as? [NSNumber], rgb.count == 3,
+                  rgb.allSatisfy({ $0.doubleValue.isFinite && (0...255).contains($0.doubleValue) }) else { return }
+            websiteCanvas = UIColor(red: CGFloat(rgb[0].doubleValue / 255), green: CGFloat(rgb[1].doubleValue / 255), blue: CGFloat(rgb[2].doubleValue / 255), alpha: 1)
+            refreshPageBackground()
         case "navigation":
             let visible = body["barVisible"] as? Bool ?? false
             if visible != barVisible { barVisible = visible }
@@ -473,6 +509,7 @@ private struct CompanionSettingsView: View {
     }
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         documentID = nil; runtimeReady = false; runtimeFailed = false; shiftIssue = nil; configureHardware(); loading = true; failure = nil
+        websiteCanvas = nil
     }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { loading = false; failure = nil; refreshPageBackground() }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { failed(error) }

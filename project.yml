@@ -22,8 +22,8 @@ targets:
       properties:
         CFBundleDisplayName: VV Courier
         CFBundleName: VV Courier
-        CFBundleShortVersionString: '1.2.3'
-        CFBundleVersion: '15'
+        CFBundleShortVersionString: '1.2.4'
+        CFBundleVersion: '16'
         NSCameraUsageDescription: Фото чеков и хладоэлементов, сканирование QR-кодов терминала, очереди и пакетов заказа.
         NSPhotoLibraryUsageDescription: Выбор фотографии чека или хладоэлементов для отправки в ВкусВилл.
         NSPhotoLibraryAddUsageDescription: Сохранение карточки с итогами заработка в Фото по твоему запросу.

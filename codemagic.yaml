@@ -2,7 +2,7 @@
 # Manual builds only; SideStore signs the resulting iPhoneOS IPA on the device.
 workflows:
   sidestore-unsigned:
-    name: VV Courier 1.2.3 (15) - SideStore
+    name: VV Courier 1.2.4 (16) - SideStore
     instance_type: mac_mini_m2
     max_build_duration: 60
     environment:
@@ -43,11 +43,11 @@ workflows:
           from pathlib import Path
           import sys
           Path('build/qa/Build-Status.json').write_text(json.dumps({
-              'exit_status': int(sys.argv[1]), 'version': '1.2.3', 'build': '15'
+              'exit_status': int(sys.argv[1]), 'version': '1.2.4', 'build': '16'
           }, indent=2) + '\n')
           PY
             cp -R build/logs build/qa/logs
-            /usr/bin/ditto -c -k --keepParent build/qa build/VV-Courier-1.2.3-QA.zip
+            /usr/bin/ditto -c -k --keepParent build/qa build/VV-Courier-1.2.4-QA.zip
             exit "$original_status"
           }
           trap collect_qa EXIT
@@ -55,7 +55,7 @@ workflows:
           trap 'exit 143' TERM
 
           # A failed QA/validation gate must never leave a downloadable IPA.
-          rm -f build/VV-Courier-1.2.3.ipa build/IPA-Validation.json
+          rm -f build/VV-Courier-1.2.4.ipa build/IPA-Validation.json
           test -f project.yml
           test -f BuildSupport.zip
           python3 -m zipfile -e BuildSupport.zip .
@@ -67,6 +67,7 @@ workflows:
           for suite in \
             run_core_tests.sh \
             run_original_runtime_tests.sh \
+            run_original_cash_change_tests.sh \
             run_original_shift_readiness_tests.sh \
             run_account_activity_tests.sh \
             run_original_diagnostics_tests.sh \
@@ -120,9 +121,9 @@ workflows:
             build/package/Payload/VVCourier.app
           (
             cd build/package
-            /usr/bin/ditto -c -k --keepParent Payload ../validated/VV-Courier-1.2.3.ipa
+            /usr/bin/ditto -c -k --keepParent Payload ../validated/VV-Courier-1.2.4.ipa
           )
-          python3 Tests/validate_ipa.py build/validated/VV-Courier-1.2.3.ipa \
+          python3 Tests/validate_ipa.py build/validated/VV-Courier-1.2.4.ipa \
             2>&1 | tee build/logs/ipa-validation.log
           python3 - <<'PY' 2>&1 | tee build/logs/macho-validation.log
           import json
@@ -154,17 +155,17 @@ workflows:
           report.write_text(json.dumps(result, indent=2) + '\n')
           print(json.dumps(result, indent=2))
           PY
-          mv build/validated/VV-Courier-1.2.3.ipa build/VV-Courier-1.2.3.ipa
+          mv build/validated/VV-Courier-1.2.4.ipa build/VV-Courier-1.2.4.ipa
           mv build/validated/IPA-Validation.json build/IPA-Validation.json
     artifacts:
-      - build/VV-Courier-1.2.3.ipa
+      - build/VV-Courier-1.2.4.ipa
       # Codemagic includes raw JSON in its general artifacts ZIP; IPA remains a
       # separate download. No external artifact service or credentials are used.
       - build/IPA-Validation.json
-      - build/VV-Courier-1.2.3-QA.zip
+      - build/VV-Courier-1.2.4-QA.zip
 
   sidestore-package:
-    name: VV Courier 1.2.3 (15) - Package IPA
+    name: VV Courier 1.2.4 (16) - Package IPA
     instance_type: mac_mini_m2
     max_build_duration: 30
     environment:
@@ -195,11 +196,11 @@ workflows:
           /usr/bin/ditto "$APP" build/package/Payload/VVCourier.app
           (
             cd build/package
-            /usr/bin/ditto -c -k --keepParent Payload ../validated/VV-Courier-1.2.3.ipa
+            /usr/bin/ditto -c -k --keepParent Payload ../validated/VV-Courier-1.2.4.ipa
           )
-          python3 Tests/validate_ipa.py build/validated/VV-Courier-1.2.3.ipa
-          mv build/validated/VV-Courier-1.2.3.ipa build/VV-Courier-1.2.3.ipa
+          python3 Tests/validate_ipa.py build/validated/VV-Courier-1.2.4.ipa
+          mv build/validated/VV-Courier-1.2.4.ipa build/VV-Courier-1.2.4.ipa
           mv build/validated/IPA-Validation.json build/IPA-Validation.json
     artifacts:
-      - build/VV-Courier-1.2.3.ipa
+      - build/VV-Courier-1.2.4.ipa
       - build/IPA-Validation.json
