@@ -6,7 +6,7 @@ on:
         description: iPhone UI scenarios
         type: choice
         default: all
-        options: [all, theme, original, earnings, poster, startup]
+        options: [all, theme, original, earnings, poster, startup, login]
       build_runner:
         description: Standard build Mac
         type: choice
@@ -57,6 +57,8 @@ jobs:
             set -- -only-testing:CourierUITests/CourierFlowTests/testLivePaletteUpdatesPreloadedScreens
           elif [ "${{ inputs.ui_scope }}" = "original" ]; then
             set -- -only-testing:CourierUITests/OriginalIntegrationTests
+          elif [ "${{ inputs.ui_scope }}" = "login" ]; then
+            set -- -only-testing:CourierUITests/OriginalIntegrationTests/testOriginalPublicLoginLoadsWithoutRequestingSMS
           elif [ "${{ inputs.ui_scope }}" = "earnings" ]; then
             set -- -only-testing:CourierUITests/OriginalIntegrationTests -only-testing:CourierUITests/IncomeFeatureTests
           elif [ "${{ inputs.ui_scope }}" = "poster" ]; then
