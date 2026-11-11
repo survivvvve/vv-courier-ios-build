@@ -274,7 +274,13 @@ private struct CompanionSettingsView: View {
                 failure = "Отсутствует проверочный экран."; loading = false; return
             }
             webView.loadFileURL(html, allowingReadAccessTo: html.deletingLastPathComponent())
-        } else { webView.load(URLRequest(url: URL(string: "https://courier.vkusvill.ru/start")!)) }
+        } else {
+            // Start at the same entry point as the website after login. On
+            // /start its initializer deliberately skips profile/shop loading
+            // for a saved token, while the router redirects to the cabinet.
+            // With a cold store that leaves the cabinet's spinner forever.
+            webView.load(URLRequest(url: URL(string: "https://courier.vkusvill.ru/")!))
+        }
     }
 
     private func configureHardware() {
