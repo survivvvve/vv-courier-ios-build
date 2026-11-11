@@ -162,3 +162,44 @@ workflows:
       # separate download. No external artifact service or credentials are used.
       - build/IPA-Validation.json
       - build/VV-Courier-1.2.2-QA.zip
+
+  sidestore-package:
+    name: VV Courier 1.2.2 (14) - Package IPA
+    instance_type: mac_mini_m2
+    max_build_duration: 30
+    environment:
+      xcode: '16.4'
+    scripts:
+      - name: Archive and package unsigned iPhone IPA
+        script: |
+          #!/bin/bash
+          set -euo pipefail
+          python3 -m zipfile -e BuildSupport.zip .
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen generate --spec project.yml
+          xcodebuild archive -project VVCourier.xcodeproj -scheme VVCourier \
+            -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
+            -archivePath build/VVCourier.xcarchive ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+          APP='build/VVCourier.xcarchive/Products/Applications/VVCourier.app'
+          APP_EXECUTABLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")
+          test "$(xcrun lipo -archs "$APP/$APP_EXECUTABLE")" = arm64
+          xcrun otool -L "$APP/$APP_EXECUTABLE" > build/LoadedLibraries.txt
+          if grep -Fq 'libswiftWebKit.dylib' build/LoadedLibraries.txt; then
+            exit 1
+          fi
+          test -z "$(find "$APP" -name libswiftWebKit.dylib -print -quit)"
+          mkdir -p build/package/Payload build/validated
+          /usr/bin/ditto "$APP" build/package/Payload/VVCourier.app
+          (
+            cd build/package
+            /usr/bin/ditto -c -k --keepParent Payload ../validated/VV-Courier-1.2.2.ipa
+          )
+          python3 Tests/validate_ipa.py build/validated/VV-Courier-1.2.2.ipa
+          mv build/validated/VV-Courier-1.2.2.ipa build/VV-Courier-1.2.2.ipa
+          mv build/validated/IPA-Validation.json build/IPA-Validation.json
+    artifacts:
+      - build/VV-Courier-1.2.2.ipa
+      - build/IPA-Validation.json
