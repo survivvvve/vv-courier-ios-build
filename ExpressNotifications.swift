@@ -399,14 +399,15 @@ final class ExpressNotificationPreferences: ObservableObject {
             await center.refreshAuthorization()
             var quiet = center.needsQuietResume(), failures = 0
             while !Task.isCancelled && model.identity == owner {
+                let activity = model.activityObservation()
                 if let active = await center.poll(session: session, shops: model.api.shopNumbers, quiet: quiet) {
                     guard !Task.isCancelled, model.identity == owner else { return }
                     quiet = false; failures = 0
-                    if model.active != active || !model.shiftKnown { model.active = active; model.shiftKnown = true }
+                    model.observeNativeActivity(active, ifCurrent: activity)
                 } else {
                     guard !Task.isCancelled, model.identity == owner else { return }
                     failures = min(4, failures + 1)
-                    if center.observedShift == nil && model.shiftKnown { model.shiftKnown = false }
+                    if center.observedShift == nil && model.shiftKnown { model.observeNativeActivity(nil, ifCurrent: activity) }
                 }
                 do { try await Task.sleep(nanoseconds: UInt64(min(120, 20 * max(1, failures))) * 1_000_000_000) } catch { return }
             }

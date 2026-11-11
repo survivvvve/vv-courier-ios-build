@@ -46,7 +46,13 @@ struct OriginalCourierShell: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity).allowsHitTesting(false)
                 }
             }
-        }.background(Palette.background)
+        }.background {
+            if controller.showsNativeSurface {
+                Rectangle().fill(Palette.background).ignoresSafeArea()
+            } else {
+                Color(uiColor: controller.pageBackground).ignoresSafeArea()
+            }
+        }
             .sheet(item: $controller.presented) { destination in
                 switch destination {
                 case .income:
@@ -65,6 +71,13 @@ struct OriginalCourierShell: View {
                 if value { controller.presented = nil; controller.closeWheel(); controller.navigate("/start/auth"); model.loginPresented = false }
             }
             .onChange(of: model.notificationTarget?.id) { _, _ in controller.openNotification() }
+            .alert("Проверки перед сменой", isPresented: Binding(get: { controller.shiftIssue != nil }, set: { if !$0 { controller.shiftIssue = nil } }), presenting: controller.shiftIssue) { issue in
+                if issue.phase == .failed && issue.status != 429 {
+                    Button("Обновить экран") { controller.shiftIssue = nil; controller.reload() }
+                }
+                Button("Скопировать код ошибки") { UIPasteboard.general.string = controller.diagnosticReport; controller.shiftIssue = nil }
+                Button("Понятно", role: .cancel) { controller.shiftIssue = nil }
+            } message: { issue in Text(issue.message) }
             .modifier(CompanionNotificationOverlay())
     }
 }
@@ -115,7 +128,9 @@ private struct OriginalCourierSurface: UIViewControllerRepresentable {
     let controller: OriginalCourierController
     let model: AppModel
     func makeUIViewController(context: Context) -> OriginalCourierController { controller.attach(model); return controller }
-    func updateUIViewController(_ controller: OriginalCourierController, context: Context) { }
+    func updateUIViewController(_ controller: OriginalCourierController, context: Context) {
+        Task { @MainActor [weak controller] in controller?.updateWebsiteAppearance() }
+    }
 }
 
 private struct CompanionSettingsView: View {
@@ -139,18 +154,23 @@ private struct CompanionSettingsView: View {
 
 @MainActor final class OriginalCourierController: UIViewController, ObservableObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
     enum Destination: String, Identifiable { case income, settings, recoveryOrders; var id: String { rawValue } }
-    @Published var wheelOpen = false
+    @Published var wheelOpen = false { didSet { synchronizePageAppearance() } }
     @Published var loading = true
-    @Published var failure: String?
+    @Published var failure: String? { didSet { synchronizePageAppearance() } }
     @Published private(set) var runtimeFailed = false {
-        didSet { webView?.accessibilityElementsHidden = runtimeFailed }
+        didSet { webView?.accessibilityElementsHidden = runtimeFailed; synchronizePageAppearance() }
     }
+    @Published private(set) var pageBackground = UIColor.systemBackground
+    @Published var shiftIssue: OriginalShiftReadinessIssue?
     @Published var barVisible = false
     @Published var barHeight: CGFloat = 58
-    @Published var presented: Destination?
+    @Published var presented: Destination? { didSet { synchronizePageAppearance() } }
     private(set) var webView: WKWebView!
     private weak var model: AppModel?
     private var hardware: OriginalCameraBridge?
+    private var backgroundObservation: NSKeyValueObservation?
+    private weak var appearanceScene: UIWindowScene?
+    private var sceneAppearanceObservation: (any UITraitChangeRegistration)?
     private var documentID: String?
     private var pendingToken: String?
     private var candidateSession: Session?
@@ -159,8 +179,39 @@ private struct CompanionSettingsView: View {
     private var pendingNotification: (id: UUID, path: String)?
     private var sessionWork: Task<Void, Never>?
     private var fixture: Bool { model?.originalFixture == true }
+    var showsNativeSurface: Bool { wheelOpen || runtimeFailed || failure != nil || presented != nil }
 
     func attach(_ model: AppModel) { self.model = model }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        updateWebsiteAppearance()
+    }
+
+    func updateWebsiteAppearance() {
+        guard isViewLoaded, let webView, let scene = view.window?.windowScene else { return }
+        if appearanceScene !== scene {
+            if let appearanceScene, let sceneAppearanceObservation {
+                appearanceScene.unregisterForTraitChanges(sceneAppearanceObservation)
+            }
+            appearanceScene = scene
+            sceneAppearanceObservation = scene.registerForTraitChanges([UITraitUserInterfaceStyle.self]) { [weak self] (_: UIWindowScene, _: UITraitCollection) in
+                self?.updateWebsiteAppearance()
+            }
+        }
+        // The window follows the page canvas for legible status-bar text.
+        // Keep CSS prefers-color-scheme tied to the user's setting/system scene,
+        // rather than feeding that window override back into the website.
+        let preference = AppAppearance(rawValue: UserDefaults.standard.string(forKey: "appearance") ?? "") ?? .system
+        let style: UIUserInterfaceStyle
+        switch preference {
+        case .light: style = .light
+        case .dark: style = .dark
+        case .system: style = scene.traitCollection.userInterfaceStyle
+        }
+        if webView.overrideUserInterfaceStyle != style { webView.overrideUserInterfaceStyle = style }
+        refreshPageBackground()
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -172,12 +223,23 @@ private struct CompanionSettingsView: View {
               let diagnosticSource = try? String(contentsOf: diagnosticURL, encoding: .utf8) else {
             failure = "В сборке отсутствует обработка ошибок экрана ВВ. Переустанови последнюю IPA."; loading = false; return
         }
-        runtime = diagnosticSource + "\n" + source
+        guard let shiftURL = Bundle.main.url(forResource: "OriginalShiftReadiness", withExtension: "js"),
+              let shiftSource = try? String(contentsOf: shiftURL, encoding: .utf8) else {
+            failure = "В сборке отсутствует проверка готовности смены. Переустанови последнюю IPA."; loading = false; return
+        }
+        runtime = diagnosticSource + "\n" + shiftSource + "\n" + source
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
         configuration.allowsInlineMediaPlayback = true
         configuration.mediaTypesRequiringUserActionForPlayback = []
         configuration.userContentController.add(WeakOriginalMessageHandler(self), name: "vvNative")
+        if fixture && ProcessInfo.processInfo.arguments.contains("--original-shift-ui-testing") {
+            guard let bootstrapURL = Bundle.main.url(forResource: "OriginalShiftFixtureBootstrap", withExtension: "js"),
+                  let bootstrap = try? String(contentsOf: bootstrapURL, encoding: .utf8) else {
+                failure = "Отсутствует офлайн-проверка смены."; loading = false; return
+            }
+            configuration.userContentController.addUserScript(WKUserScript(source: bootstrap, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        }
         if !fixture, let session = model?.session {
             let json = Self.json(["token": session.token, "courierID": session.courierID])
             // This migration script is removed immediately after the first boot.
@@ -191,6 +253,11 @@ private struct CompanionSettingsView: View {
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.allowsBackForwardNavigationGestures = true
         webView.isOpaque = true; webView.backgroundColor = .systemBackground
+        // Follow WebKit's computed page canvas, including SPA theme changes.
+        // Do not override underPageBackgroundColor: it must keep tracking HTML.
+        backgroundObservation = webView.observe(\.underPageBackgroundColor, options: [.initial, .new]) { [weak self] _, _ in
+            Task { @MainActor [weak self] in self?.refreshPageBackground() }
+        }
         webView.accessibilityIdentifier = "original.web"
         webView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(webView)
@@ -200,7 +267,10 @@ private struct CompanionSettingsView: View {
             failure = "Проверка без сети."; loading = false; return
         }
         if fixture {
-            guard let html = Bundle.main.url(forResource: "OriginalFixture", withExtension: "html") else {
+            let arguments = ProcessInfo.processInfo.arguments
+            let name = arguments.contains("--original-shift-ui-testing") ? "OriginalShiftFixture"
+                : arguments.contains("--original-appearance-ui-testing") ? "OriginalAppearanceFixture" : "OriginalFixture"
+            guard let html = Bundle.main.url(forResource: name, withExtension: "html") else {
                 failure = "Отсутствует проверочный экран."; loading = false; return
             }
             webView.loadFileURL(html, allowingReadAccessTo: html.deletingLastPathComponent())
@@ -215,6 +285,22 @@ private struct CompanionSettingsView: View {
             if let data { value["data"] = data }; if let error { value["error"] = error }
             self?.send(value)
         }
+    }
+
+    private func refreshPageBackground() {
+        guard let webView else { return }
+        let color = (webView.underPageBackgroundColor ?? UIColor.systemBackground).resolvedColor(with: webView.traitCollection)
+        if !pageBackground.isEqual(color) { pageBackground = color }
+        view.backgroundColor = color
+        webView.backgroundColor = color
+        webView.scrollView.backgroundColor = color
+        synchronizePageAppearance()
+    }
+
+    private func synchronizePageAppearance() {
+        guard let model else { return }
+        let scheme: ColorScheme? = showsNativeSurface ? nil : (pageBackground.relativeLuminance < 0.179 ? .dark : .light)
+        if model.webColorScheme != scheme { model.webColorScheme = scheme }
     }
 
     func openWheel() { if !wheelOpen { wheelOpen = true }; evaluate("window.__vvCompanion?.setWheel(true)") }
@@ -266,6 +352,13 @@ private struct CompanionSettingsView: View {
             userContentController.addUserScript(WKUserScript(source: runtime, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         }
         switch kind {
+        case "shift-readiness":
+            guard let raw = body["phase"] as? String, let phase = OriginalShiftReadinessIssue.Phase(rawValue: raw) else { return }
+            var value: [String: Any] = ["kind": "diagnostic", "category": phase == .loading ? "shift_checks_loading" : "shift_checks_failed",
+                "fatal": false, "path": webView.url?.path ?? "/<other>"]
+            if let status = body["status"] { value["httpStatus"] = status }
+            guard let event = OriginalWebDiagnostics.shared.record(value) else { return }
+            shiftIssue = OriginalShiftReadinessIssue(phase: phase, status: event.httpStatus)
         case "diagnostic":
             if let event = OriginalWebDiagnostics.shared.record(body), event.fatal {
                 runtimeFailed = true
@@ -350,7 +443,7 @@ private struct CompanionSettingsView: View {
         switch body["endpoint"] as? String {
         case "/v1/courier/activity":
             let status = string(data["res"])
-            if status == "0" || status == "1" { model.active = status == "1"; model.shiftKnown = true }
+            if status == "0" || status == "1" { model.observeWebsiteActivity(status == "1") }
         case "/v1/courier/courier": model.profile = data
         case "/v1/courier/shops":
             if let shops = data["shops"] as? [[String: Any]] { model.shops = shops.filter { !truth($0["invisible"]) }.compactMap(Shop.init) }
@@ -373,9 +466,9 @@ private struct CompanionSettingsView: View {
         return text
     }
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-        documentID = nil; runtimeReady = false; runtimeFailed = false; configureHardware(); loading = true; failure = nil
+        documentID = nil; runtimeReady = false; runtimeFailed = false; shiftIssue = nil; configureHardware(); loading = true; failure = nil
     }
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { loading = false; failure = nil }
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { loading = false; failure = nil; refreshPageBackground() }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { failed(error) }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { failed(error) }
     private func failed(_ error: Error) { if (error as NSError).code != NSURLErrorCancelled { loading = false; failure = error.localizedDescription } }
@@ -403,6 +496,21 @@ private struct CompanionSettingsView: View {
         let alert = UIAlertController(title: "ВкусВилл", message: message, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "Отмена", style: .cancel) { _ in completionHandler(false) })
         alert.addAction(UIAlertAction(title: "Подтвердить", style: .default) { _ in completionHandler(true) }); present(alert, animated: true)
+    }
+}
+
+struct OriginalShiftReadinessIssue: Identifiable {
+    enum Phase: String { case loading, failed }
+    let id = UUID()
+    let phase: Phase
+    let status: Int?
+    var message: String {
+        if phase == .loading {
+            return "ВВ ещё загружает обязательные проверки. Подожди несколько секунд и нажми кнопку начала смены снова."
+        }
+        if status == 429 { return "ВВ ограничил частоту запросов проверок. Подожди перед повторной попыткой. Код ответа: 429." }
+        let code = status.map { $0 == 0 ? " Сетевой запрос не завершился." : " Код ответа: \($0)." } ?? ""
+        return "Не удалось загрузить обязательные проверки ВВ. Проверь связь и обнови экран. Смена автоматически не запускается." + code
     }
 }
 

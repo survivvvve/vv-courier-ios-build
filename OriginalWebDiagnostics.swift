@@ -20,6 +20,7 @@ struct OriginalWebDiagnosticEvent: Codable, Equatable {
         case referenceError = "reference_error", syntaxError = "syntax_error"
         case domError = "dom_error", promiseRejection = "promise_rejection"
         case reactErrorScreen = "react_error_screen"
+        case shiftChecksLoading = "shift_checks_loading", shiftChecksFailed = "shift_checks_failed"
     }
     enum Property: String, Codable, CaseIterable {
         case length, map, forEach, concat, filter, parcels, orders, suborders
@@ -52,6 +53,7 @@ struct OriginalWebDiagnosticEvent: Codable, Equatable {
     let property: Property?
     let frames: [Frame]
     let version: String?
+    let httpStatus: Int?
     let recordedAt: Date
 }
 
@@ -95,6 +97,7 @@ final class OriginalWebDiagnostics {
             var detail = event.path.rawValue
             if let version = event.version { detail += " · v\(version)" }
             if let property = event.property { detail += " · property=\(property.rawValue)" }
+            if let status = event.httpStatus { detail += status == 0 ? " · network" : " · HTTP \(status)" }
             lines.append(detail)
             lines += event.frames.map { "\($0.file):\($0.line):\($0.column)" }
         }
@@ -110,6 +113,14 @@ final class OriginalWebDiagnostics {
         let path = (body["path"] as? String).flatMap(OriginalWebDiagnosticEvent.Path.init(rawValue:)) ?? .other
         let property = (body["property"] as? String).flatMap(OriginalWebDiagnosticEvent.Property.init(rawValue:))
         let version = (body["version"] as? String).flatMap { matches($0, "^[0-9]{1,4}(\\.[0-9]{1,4}){1,3}$") ? $0 : nil }
+        var httpStatus: Int?
+        if let raw = body["httpStatus"] {
+            guard let value = raw as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID(),
+                  value.doubleValue.isFinite,
+                  value.doubleValue.rounded(.towardZero) == value.doubleValue,
+                  value.doubleValue == 0 || (100...599).contains(value.doubleValue) else { return nil }
+            httpStatus = Int(value.doubleValue)
+        }
         let candidates = body["frames"] as? [Any] ?? []
         let frames = candidates.prefix(6).compactMap { raw -> OriginalWebDiagnosticEvent.Frame? in
             guard let value = raw as? [String: Any], let file = value["file"] as? String,
@@ -121,7 +132,7 @@ final class OriginalWebDiagnostics {
         }
         guard date.timeIntervalSince1970.isFinite, date >= .distantPast, date <= .distantFuture else { return nil }
         return OriginalWebDiagnosticEvent(kind: .diagnostic, category: category, fatal: rawFatal.boolValue,
-            path: path, property: property, frames: frames, version: version, recordedAt: date)
+            path: path, property: property, frames: frames, version: version, httpStatus: httpStatus, recordedAt: date)
     }
 
     private static func matches(_ text: String, _ pattern: String) -> Bool {

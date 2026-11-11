@@ -20,7 +20,8 @@ struct VVCourierApp: App {
     var body: some Scene {
         WindowGroup {
             CourierThemeRoot(theme: AppTheme(rawValue: palette) ?? .codex).environmentObject(model)
-                .preferredColorScheme((AppAppearance(rawValue: appearance) ?? .system).colorScheme)
+                .preferredColorScheme((!model.demo || model.originalFixture ? model.webColorScheme : nil)
+                    ?? (AppAppearance(rawValue: appearance) ?? .system).colorScheme)
                 .environment(\.locale, Locale(identifier: "ru_RU"))
         }
     }
@@ -63,12 +64,21 @@ private struct CourierThemeRoot: View {
     @Published private var authGeneration = 0
     @Published var errorPresenters: [UUID] = []
     @Published var notificationTarget: ExpressNotificationTarget?
+    // Only the visible website controls the window chrome. Native sheets and
+    // the wheel restore the user's configured appearance through a nil value.
+    @Published var webColorScheme: ColorScheme?
     private var bootstrapTaskID: UUID?
     private var bootstrapWork: Task<Void, Never>?
     private var bootstrapIdentity: String?
     private var operationID: UUID?
     private var operationWork: Task<Void, Never>?
     private var restoringShopSelection = false
+    private var websiteActivityRevision: UInt64 = 0
+    struct ActivityObservation {
+        fileprivate let identity: String
+        fileprivate let token: String?
+        fileprivate let websiteRevision: UInt64
+    }
     var api: CourierAPI { CourierAPI(session: session, shopNumbers: selectedShopID.map { [$0] } ?? shops.map(\.id)) }
     var identity: String { demo ? "demo" : (session?.courierID ?? "guest") + ":\(authGeneration)" }
     var shopScopeKey: String { identity + ":" + (selectedShopID.map(String.init) ?? "all") }
@@ -143,6 +153,25 @@ private struct CourierThemeRoot: View {
         let all = feed == .mine ? demoMine : Demo.orders(feed).filter { !demoTaken.contains($0.id) }
         return feed == .mine || selectedShopID == nil ? all : all.filter { $0.shopID == selectedShopID }
     }
+    func activityObservation() -> ActivityObservation {
+        ActivityObservation(identity: identity, token: session?.token, websiteRevision: websiteActivityRevision)
+    }
+    /// The website owns shift mutations. A native read already in flight must
+    /// not undo a newer activity response observed from that same website.
+    func observeWebsiteActivity(_ value: Bool) {
+        guard !demo, session != nil else { return }
+        websiteActivityRevision &+= 1
+        active = value; shiftKnown = true
+    }
+    @discardableResult
+    func observeNativeActivity(_ value: Bool?, ifCurrent observation: ActivityObservation) -> Bool {
+        guard !demo, session != nil, !sessionExpired,
+              identity == observation.identity, session?.token == observation.token,
+              websiteActivityRevision == observation.websiteRevision else { return false }
+        if let value { active = value; shiftKnown = true }
+        else { shiftKnown = false }
+        return true
+    }
     func bootstrap() async {
         guard !demo, let session else { return }
         let owner = identity
@@ -156,6 +185,7 @@ private struct CourierThemeRoot: View {
     }
     private func loadAccount(session: Session, owner: String) async {
         let id = UUID(); bootstrapTaskID = id
+        let initialActivity = activityObservation()
         func current() -> Bool { bootstrapTaskID == id && identity == owner && self.session?.token == session.token && !demo && !Task.isCancelled }
         let client = CourierAPI(session: session)
         do {
@@ -167,9 +197,11 @@ private struct CourierThemeRoot: View {
             sessionExpired = false
             do { let value = try await client.profile(); if current() { profile = value } } catch { if current() { handle(error) } }
             guard current() else { return }
-            do { let value = try await client.activeShift(); if current() { active = value; shiftKnown = true } } catch { if current() { shiftKnown = false; handle(error) } }
+            let activity = activityObservation()
+            do { let value = try await client.activeShift(); if current() { observeNativeActivity(value, ifCurrent: activity) } }
+            catch { if current(), observeNativeActivity(nil, ifCurrent: activity) { handle(error) } }
         } catch is CancellationError { }
-        catch { if current() { shiftKnown = false; handle(error) } }
+        catch { if current(), observeNativeActivity(nil, ifCurrent: initialActivity) { handle(error) } }
     }
 }
 
